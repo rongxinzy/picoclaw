@@ -71,7 +71,9 @@ func TestStartAEPSessionInjectsModelsAndDefault(t *testing.T) {
 		byName[cfg.ModelList[i].ModelName] = cfg.ModelList[i]
 	}
 	qwen, ok := byName["qwen"]
-	if !ok || qwen.Provider != "aep" || qwen.Model != "qwen3-32b" || qwen.APIBase != "https://gw.example.test/v1" || !qwen.Enabled {
+	// The wire model is the AEP model id; the upstream rewrite belongs to the
+	// gateway, not the client.
+	if !ok || qwen.Provider != "aep" || qwen.Model != "qwen" || qwen.APIBase != "https://gw.example.test/v1" || !qwen.Enabled {
 		t.Fatalf("injected qwen entry = %+v", qwen)
 	}
 	if _, hasRetired := byName["retired"]; hasRetired {

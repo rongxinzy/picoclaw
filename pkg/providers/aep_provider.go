@@ -93,14 +93,13 @@ func InjectAEPModels(cfg *config.Config, manager *aep.Manager) error {
 		if !m.Enabled {
 			continue
 		}
-		upstream := m.UpstreamModel
-		if upstream == "" {
-			upstream = m.ID
-		}
+		// The wire model name is the AEP model id; the gateway owns any
+		// upstream-model rewrite (Model.UpstreamModel is its input, not the
+		// client's concern).
 		entry := &config.ModelConfig{
 			ModelName: m.ID,
 			Provider:  "aep",
-			Model:     upstream,
+			Model:     m.ID,
 			APIBase:   gateway,
 			Enabled:   true,
 		}
