@@ -121,3 +121,14 @@ func TestDeptDataRowsAreDeterministic(t *testing.T) {
 		t.Fatalf("unexpected row shape: %q", first)
 	}
 }
+
+func TestDeptDataUsesDeterministicSenderContext(t *testing.T) {
+	server, _ := newScopeServer(t, `{"principalId":"user-9","deploymentId":"demo","orgScope":["dept-x"],"ownTeamIds":["dept-x"],"roleScope":[]}`)
+	tool := NewDeptDataTool(newManagerAgainst(t, server))
+
+	ctx := toolshared.WithToolSenderContext(context.Background(), "user-9", "Qi Ba")
+	res := tool.Execute(ctx, map[string]any{"dataset": "monthly_sales"})
+	if !strings.Contains(res.ForLLM, "team=dept-x revenue") {
+		t.Fatalf("deterministic sender path failed: %q", res.ContentForLLM())
+	}
+}

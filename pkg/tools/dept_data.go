@@ -108,15 +108,18 @@ func stableNumber(salt string, min, max int) int {
 	return min + int(h.Sum32())%span
 }
 
-// requesterUserID extracts the aepchat sender identity injected into the
-// session scope by the channel ("aepchat:<user id>").
+// requesterUserID resolves the requester identity for the current turn:
+// the deterministic tool-context sender first, then the session-scope
+// "sender" dimension ("aepchat:<user id>") as a fallback.
 func requesterUserID(ctx context.Context) string {
+	if id := toolshared.ToolSenderID(ctx); id != "" {
+		return strings.TrimPrefix(id, "aepchat:")
+	}
 	scope := toolshared.ToolSessionScope(ctx)
 	if scope == nil {
 		return ""
 	}
-	sender := scope.Values["sender"]
-	return strings.TrimPrefix(sender, "aepchat:")
+	return strings.TrimPrefix(scope.Values["sender"], "aepchat:")
 }
 
 func deniedTeams(scope *aep.RetrievalContext) map[string]bool {

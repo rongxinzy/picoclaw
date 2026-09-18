@@ -85,6 +85,20 @@ func ToolSessionKey(ctx context.Context) string {
 	return toolshared.ToolSessionKey(ctx)
 }
 
+func WithToolSenderContext(ctx context.Context, senderID, senderName string) context.Context {
+	return toolshared.WithToolSenderContext(ctx, senderID, senderName)
+}
+
+// ToolSenderID returns the requester id of the current turn, if known.
+func ToolSenderID(ctx context.Context) string {
+	return toolshared.ToolSenderID(ctx)
+}
+
+// ToolSenderDisplayName returns the requester display name, if known.
+func ToolSenderDisplayName(ctx context.Context) string {
+	return toolshared.ToolSenderDisplayName(ctx)
+}
+
 func ToolSessionScope(ctx context.Context) *session.SessionScope {
 	return toolshared.ToolSessionScope(ctx)
 }
