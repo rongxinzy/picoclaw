@@ -24,8 +24,8 @@ type AEPConfig struct {
 	// Supervisor credentials carry the ephemeral lifecycle authority
 	// (users.write). Deliberately separate from the digital employee account,
 	// which never holds provisioning rights.
-	SupervisorUsername string       `json:"supervisor_username,omitempty" yaml:"-"                  env:"PICOCLAW_AEP_SUPERVISOR_USERNAME"`
-	SupervisorPassword SecureString `json:"supervisor_password,omitzero"  yaml:"password,omitempty" env:"PICOCLAW_AEP_SUPERVISOR_PASSWORD"`
+	SupervisorUsername string       `json:"supervisor_username,omitempty" yaml:"-"                          env:"PICOCLAW_AEP_SUPERVISOR_USERNAME"`
+	SupervisorPassword SecureString `json:"supervisor_password,omitzero"  yaml:"supervisor_password,omitempty" env:"PICOCLAW_AEP_SUPERVISOR_PASSWORD"`
 }
 
 // IsComplete reports whether the mandatory connection fields are present.
