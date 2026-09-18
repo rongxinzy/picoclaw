@@ -27,6 +27,31 @@ func NewHTTPProviderWithMaxTokensField(apiKey, apiBase, proxy, maxTokensField st
 	return NewHTTPProviderWithMaxTokensFieldAndRequestTimeout(apiKey, apiBase, proxy, maxTokensField, "", 0, nil, nil)
 }
 
+// NewHTTPProviderWithTokenSource builds an OpenAI-compatible provider whose
+// bearer token is resolved per request (e.g. a rotating AEP model access
+// token) instead of a static API key.
+func NewHTTPProviderWithTokenSource(
+	apiBase, proxy, maxTokensField, userAgent string,
+	requestTimeoutSeconds int,
+	extraBody map[string]any,
+	customHeaders map[string]string,
+	tokenSource func(ctx context.Context) (string, error),
+) *HTTPProvider {
+	return &HTTPProvider{
+		delegate: openai_compat.NewProvider(
+			"",
+			apiBase,
+			proxy,
+			openai_compat.WithMaxTokensField(maxTokensField),
+			openai_compat.WithRequestTimeout(time.Duration(requestTimeoutSeconds)*time.Second),
+			openai_compat.WithExtraBody(extraBody),
+			openai_compat.WithCustomHeaders(customHeaders),
+			openai_compat.WithUserAgent(userAgent),
+			openai_compat.WithTokenSource(tokenSource),
+		),
+	}
+}
+
 func NewHTTPProviderWithMaxTokensFieldAndRequestTimeout(
 	apiKey, apiBase, proxy, maxTokensField, userAgent string,
 	requestTimeoutSeconds int,

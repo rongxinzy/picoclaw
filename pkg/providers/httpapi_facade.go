@@ -1,6 +1,10 @@
 package providers
 
-import httpapi "github.com/sipeed/picoclaw/pkg/providers/httpapi"
+import (
+	"context"
+
+	httpapi "github.com/sipeed/picoclaw/pkg/providers/httpapi"
+)
 
 type (
 	GeminiProvider = httpapi.GeminiProvider
@@ -42,5 +46,26 @@ func NewHTTPProviderWithMaxTokensFieldAndRequestTimeout(
 		requestTimeoutSeconds,
 		extraBody,
 		customHeaders,
+	)
+}
+
+// NewHTTPProviderWithTokenSource returns an OpenAI-compatible provider that
+// resolves its bearer token per request via tokenSource.
+func NewHTTPProviderWithTokenSource(
+	apiBase, proxy, maxTokensField, userAgent string,
+	requestTimeoutSeconds int,
+	extraBody map[string]any,
+	customHeaders map[string]string,
+	tokenSource func(ctx context.Context) (string, error),
+) *HTTPProvider {
+	return httpapi.NewHTTPProviderWithTokenSource(
+		apiBase,
+		proxy,
+		maxTokensField,
+		userAgent,
+		requestTimeoutSeconds,
+		extraBody,
+		customHeaders,
+		tokenSource,
 	)
 }

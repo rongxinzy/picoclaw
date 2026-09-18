@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/aep"
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/audio/asr"
 	"github.com/sipeed/picoclaw/pkg/audio/tts"
@@ -70,6 +71,7 @@ type services struct {
 	ChannelManager   *channels.Manager
 	DeviceService    *devices.Service
 	HealthServer     *health.Server
+	AEPSession       *aep.Manager
 	VoiceAgentCancel context.CancelFunc
 	manualReloadChan chan struct{}
 	reloading        atomic.Bool
@@ -156,6 +158,17 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 		return fmt.Errorf("config pre-check failed: %w", err)
 	}
 
+	// Digital-employee binding: the AEP session must be live (identity,
+	// authorization, model catalog) before any provider is constructed.
+	var aepManager *aep.Manager
+	if cfg.AEP.Enabled {
+		aepManager, err = startAEPSession(cfg)
+		if err != nil {
+			return fmt.Errorf("error starting AEP session: %w", err)
+		}
+		defer aepManager.Stop()
+	}
+
 	// Debug mode permanently overrides the config log level to DEBUG.
 	if debug {
 		fmt.Println("🔍 Debug mode enabled")
@@ -215,6 +228,7 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	if err != nil {
 		return err
 	}
+	runningServices.AEPSession = aepManager
 	// All services (channels + shared HTTP server) are up; mark the health
 	// server ready so GET /ready reports "ready". The health endpoints are
 	// mounted on the shared gateway mux, so Health.Server.Start() (which would
@@ -539,6 +553,10 @@ func stopAndCleanupServices(runningServices *services, shutdownTimeout time.Dura
 	if !isReload && runningServices.ChannelManager != nil {
 		runningServices.ChannelManager.StopAll(shutdownCtx)
 	}
+	// reload keeps the AEP session alive; only full shutdown ends it.
+	if !isReload && runningServices.AEPSession != nil {
+		runningServices.AEPSession.Stop()
+	}
 	if runningServices.VoiceAgentCancel != nil {
 		runningServices.VoiceAgentCancel()
 	}
@@ -601,6 +619,12 @@ func handleConfigReload(
 
 	logger.Info("  Stopping all services...")
 	stopAndCleanupServices(runningServices, serviceShutdownTimeout, true)
+
+	// The AEP session survives reloads; refresh its model catalog into the
+	// new config before any provider is rebuilt from it.
+	if runningServices.AEPSession != nil {
+		refreshAEPForReload(al.GetConfig(), newCfg, runningServices.AEPSession)
+	}
 
 	newProvider, newModelID, err := createStartupProvider(newCfg, allowEmptyStartup)
 	if err != nil {

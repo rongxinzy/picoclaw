@@ -30,6 +30,14 @@
     "cold_path_trigger": "after_turn",
     "cold_path_times": []
   },
+  "aep": {
+    "enabled": false,
+    "base_url": "http://localhost:8080",
+    "deployment_id": "demo",
+    "username": "helper-1",
+    "session_id": "",
+    "gateway_base_url": ""
+  },
   "model_list": [
     {
       "model_name": "gpt-5.4",
