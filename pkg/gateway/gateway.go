@@ -162,7 +162,7 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	// authorization, model catalog) before any provider is constructed.
 	var aepManager *aep.Manager
 	if cfg.AEP.Enabled {
-		aepManager, err = startAEPSession(cfg)
+		aepManager, err = providers.StartAEPSession(cfg)
 		if err != nil {
 			return fmt.Errorf("error starting AEP session: %w", err)
 		}

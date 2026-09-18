@@ -1,4 +1,4 @@
-package gateway
+package providers
 
 import (
 	"encoding/json"
@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/config"
-	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
 // newFakeAEP serves the control-plane endpoints the session manager touches.
@@ -58,13 +57,13 @@ func TestStartAEPSessionInjectsModelsAndDefault(t *testing.T) {
 	fake := newFakeAEP(t)
 	cfg := aepTestConfig(fake.URL)
 
-	manager, err := startAEPSession(cfg)
+	manager, err := StartAEPSession(cfg)
 	if err != nil {
 		t.Fatalf("start AEP session: %v", err)
 	}
 	t.Cleanup(func() {
 		manager.Stop()
-		providers.SetAEPTokenSource(nil)
+		SetAEPTokenSource(nil)
 	})
 
 	byName := map[string]*config.ModelConfig{}
@@ -83,7 +82,7 @@ func TestStartAEPSessionInjectsModelsAndDefault(t *testing.T) {
 	}
 
 	// The provider family must now be constructible through the factory.
-	factoryProvider, _, err := providers.CreateProviderFromConfig(qwen)
+	factoryProvider, _, err := CreateProviderFromConfig(qwen)
 	if err != nil {
 		t.Fatalf("create aep provider from injected entry: %v", err)
 	}
@@ -102,13 +101,13 @@ func TestStartAEPSessionReplacesStaleEntriesAndKeepsExplicitDefault(t *testing.T
 	})
 	cfg.Agents.Defaults.ModelName = "glm"
 
-	manager, err := startAEPSession(cfg)
+	manager, err := StartAEPSession(cfg)
 	if err != nil {
 		t.Fatalf("start AEP session: %v", err)
 	}
 	t.Cleanup(func() {
 		manager.Stop()
-		providers.SetAEPTokenSource(nil)
+		SetAEPTokenSource(nil)
 	})
 
 	for i := range cfg.ModelList {
@@ -124,7 +123,7 @@ func TestStartAEPSessionReplacesStaleEntriesAndKeepsExplicitDefault(t *testing.T
 func TestStartAEPSessionRejectsIncompleteConfig(t *testing.T) {
 	cfg := aepTestConfig("http://unused.example")
 	cfg.AEP.Password = config.SecureString{}
-	_, err := startAEPSession(cfg)
+	_, err := StartAEPSession(cfg)
 	if err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("expected completeness error, got %v", err)
 	}

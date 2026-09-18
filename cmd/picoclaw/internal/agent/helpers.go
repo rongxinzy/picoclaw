@@ -39,6 +39,16 @@ func agentCmd(message, sessionKey, model string, debug bool) error {
 		cfg.Agents.Defaults.ModelName = model
 	}
 
+	// Digital-employee binding: start the AEP session (identity, model
+	// catalog, rotating gateway token) before any provider is constructed.
+	if cfg.AEP.Enabled {
+		aepManager, aepErr := providers.StartAEPSession(cfg)
+		if aepErr != nil {
+			return fmt.Errorf("error starting AEP session: %w", aepErr)
+		}
+		defer aepManager.Stop()
+	}
+
 	provider, modelID, err := providers.CreateProvider(cfg)
 	if err != nil {
 		return fmt.Errorf("error creating provider: %w", err)
