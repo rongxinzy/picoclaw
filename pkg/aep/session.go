@@ -77,6 +77,11 @@ type Manager struct {
 	// now is swappable for deterministic tests.
 	now func() time.Time
 
+	selfMu     sync.Mutex
+	selfUserID string
+	selfCtx    *RetrievalContext
+	selfCtxAt  time.Time
+
 	cancel   context.CancelFunc
 	stopOnce sync.Once
 }
@@ -449,4 +454,75 @@ func (m *Manager) DataScopeContext(ctx context.Context, userID string) (*Retriev
 		return nil, p
 	}
 	return out, nil
+}
+
+// defaultManager is the process-wide digital-employee session, registered by
+// the boot path so surfaces like the aepchat warden can resolve requester
+// scopes with the resident account's own grants.
+var (
+	defaultManagerMu sync.RWMutex
+	defaultManager   *Manager
+)
+
+// SetDefaultManager installs the process-wide session manager.
+func SetDefaultManager(m *Manager) {
+	defaultManagerMu.Lock()
+	defer defaultManagerMu.Unlock()
+	defaultManager = m
+}
+
+// DefaultManager returns the process-wide session manager, or nil.
+func DefaultManager() *Manager {
+	defaultManagerMu.RLock()
+	defer defaultManagerMu.RUnlock()
+	return defaultManager
+}
+
+// SelfUserID resolves and memoizes the account's own user id.
+func (m *Manager) SelfUserID(ctx context.Context) (string, error) {
+	m.selfMu.Lock()
+	defer m.selfMu.Unlock()
+	if m.selfUserID != "" {
+		return m.selfUserID, nil
+	}
+	accessToken, err := m.AccessToken(ctx)
+	if err != nil {
+		return "", err
+	}
+	principal, p := m.client.CurrentUser(ctx, accessToken)
+	if p != nil {
+		return "", p
+	}
+	m.selfUserID = principal.UserID
+	return m.selfUserID, nil
+}
+
+// SelfContext resolves and caches the account's own retrieval context — for
+// a resident digital employee this is its home-team subtree plus grants.
+func (m *Manager) SelfContext(ctx context.Context) (*RetrievalContext, error) {
+	m.selfMu.Lock()
+	defer m.selfMu.Unlock()
+	if m.selfCtx != nil && time.Since(m.selfCtxAt) < 5*time.Minute {
+		return m.selfCtx, nil
+	}
+	userID := m.selfUserID
+	if userID == "" {
+		accessToken, err := m.AccessToken(ctx)
+		if err != nil {
+			return nil, err
+		}
+		principal, p := m.client.CurrentUser(ctx, accessToken)
+		if p != nil {
+			return nil, p
+		}
+		m.selfUserID = principal.UserID
+		userID = principal.UserID
+	}
+	ctxOut, err := m.DataScopeContext(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	m.selfCtx = ctxOut
+	m.selfCtxAt = time.Now()
+	return ctxOut, nil
 }

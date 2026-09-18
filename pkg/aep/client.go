@@ -279,3 +279,76 @@ func redactURL(msg string) string {
 	}
 	return msg
 }
+
+// CurrentUser resolves the authenticated account's own identity.
+func (c *Client) CurrentUser(ctx context.Context, accessToken string) (*Principal, *Problem) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/aep/v1/user/me", nil)
+	if err != nil {
+		return nil, &Problem{Title: "request build failed", Detail: err.Error(), Status: http.StatusInternalServerError}
+	}
+	var out currentUserResponse
+	if p := c.do(req, accessToken, &out); p != nil {
+		return nil, p
+	}
+	return &Principal{
+		UserID: out.User.ID, DisplayName: out.User.DisplayName, Kind: out.User.Kind,
+		DeploymentID: out.DeploymentID, Roles: out.Roles,
+	}, nil
+}
+
+// EphemeralAgentInput assembles a conversation-scoped digital employee in
+// one call: frozen scope snapshot from the requester plus model assignments.
+type EphemeralAgentInput struct {
+	Username        string   `json:"username"`
+	DisplayName     string   `json:"displayName"`
+	Password        string   `json:"password"`
+	RoleIDs         []string `json:"roleIds"`
+	TeamIDs         []string `json:"teamIds"`
+	HomeTeamID      string   `json:"homeTeamId"`
+	PromptSkillID   string   `json:"promptSkillId,omitempty"`
+	DisplayTitle    string   `json:"displayTitle,omitempty"`
+	Ephemeral       bool     `json:"ephemeral"`
+	ExpiresAt       string   `json:"expiresAt"`
+	ScopeFromUserID string   `json:"scopeFromUserId,omitempty"`
+	ModelIDs        []string `json:"modelIds,omitempty"`
+}
+
+// CreateAgent provisions a digital employee account (admin API).
+func (c *Client) CreateAgent(ctx context.Context, accessToken string, input EphemeralAgentInput) (*AgentRecord, *Problem) {
+	var out AgentRecord
+	if p := c.post(ctx, "/aep/v1/admin/agents", accessToken, input, &out); p != nil {
+		return nil, p
+	}
+	return &out, nil
+}
+
+// DeleteAgent removes a digital employee account (admin API).
+func (c *Client) DeleteAgent(ctx context.Context, accessToken, agentID string) *Problem {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/aep/v1/admin/agents/"+url.PathEscape(agentID), nil)
+	if err != nil {
+		return &Problem{Title: "request build failed", Detail: err.Error(), Status: http.StatusInternalServerError}
+	}
+	if p := c.do(req, accessToken, nil); p != nil {
+		return p
+	}
+	return nil
+}
+
+// RevokeSession revokes one user session (admin API).
+func (c *Client) RevokeSession(ctx context.Context, accessToken, sessionID string) *Problem {
+	if p := c.post(ctx, "/aep/v1/admin/sessions/"+url.PathEscape(sessionID)+"/revoke", accessToken, struct{}{}, nil); p != nil {
+		return p
+	}
+	return nil
+}
+
+// AgentRecord is the createAgent response.
+type AgentRecord struct {
+	ID           string  `json:"id"`
+	Username     string  `json:"username"`
+	DisplayName  string  `json:"displayName"`
+	HomeTeamID   string  `json:"homeTeamId"`
+	DisplayTitle string  `json:"displayTitle"`
+	Ephemeral    bool    `json:"ephemeral"`
+	ExpiresAt    *string `json:"expiresAt"`
+}

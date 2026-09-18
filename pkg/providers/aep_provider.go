@@ -66,8 +66,10 @@ func StartAEPSession(cfg *config.Config) (*aep.Manager, error) {
 		return nil, fmt.Errorf("aep session for %s failed to start: %w", acfg.Username, err)
 	}
 	SetAEPTokenSource(manager.ModelAccessToken)
+	aep.SetDefaultManager(manager)
 	if err := InjectAEPModels(cfg, manager); err != nil {
 		SetAEPTokenSource(nil)
+		aep.SetDefaultManager(nil)
 		manager.Stop()
 		return nil, fmt.Errorf("aep model injection failed: %w", err)
 	}

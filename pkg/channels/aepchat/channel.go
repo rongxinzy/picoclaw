@@ -56,6 +56,8 @@ type Channel struct {
 
 	deploymentID string
 	auth         *aep.Authenticator
+	warden       *Warden
+	supervisor   *Supervisor
 
 	mu           sync.Mutex
 	history      map[string][]record
@@ -87,6 +89,19 @@ func New(channelName string, bc *config.Channel, settings *config.AEPChatSetting
 		historyLimit: limit,
 	}
 	ch.SetOwner(ch)
+	if settings != nil && settings.Warden != nil {
+		supervisor, err := NewSupervisor(&cfg.AEP, settings.Warden)
+		if err != nil {
+			return nil, err
+		}
+		warden, err := NewWarden(aep.DefaultManager(), supervisor, cfg.AEP.HomeTeamID)
+		if err != nil {
+			supervisor.Stop()
+			return nil, err
+		}
+		ch.supervisor = supervisor
+		ch.warden = warden
+	}
 	return ch, nil
 }
 
@@ -102,8 +117,11 @@ func (c *Channel) Start(ctx context.Context) error {
 	return nil
 }
 
-func (c *Channel) Stop(_ context.Context) error {
+func (c *Channel) Stop(ctx context.Context) error {
 	c.running.Store(false)
+	if c.supervisor != nil {
+		c.supervisor.Stop()
+	}
 	return nil
 }
 
@@ -166,6 +184,13 @@ func (c *Channel) handlePost(w http.ResponseWriter, r *http.Request, chatID stri
 	principal, status, problem := c.authenticate(r)
 	if problem != "" {
 		writeError(w, status, "UNAUTHORIZED", problem)
+		return
+	}
+	if target, routeErr := c.route(r.Context(), principal); routeErr != nil {
+		writeError(w, http.StatusServiceUnavailable, "EPHEMERAL_UNAVAILABLE", routeErr.Error())
+		return
+	} else if target != "" {
+		c.proxyTo(w, r, target)
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
@@ -239,6 +264,13 @@ func (c *Channel) handleGet(w http.ResponseWriter, r *http.Request, chatID strin
 	principal, status, problem := c.authenticate(r)
 	if problem != "" {
 		writeError(w, status, "UNAUTHORIZED", problem)
+		return
+	}
+	if target, routeErr := c.route(r.Context(), principal); routeErr != nil {
+		writeError(w, http.StatusServiceUnavailable, "EPHEMERAL_UNAVAILABLE", routeErr.Error())
+		return
+	} else if target != "" {
+		c.proxyTo(w, r, target)
 		return
 	}
 	after := int64(0)
@@ -317,6 +349,43 @@ func (c *Channel) append(chatID string, rec record) record {
 		c.history[chatID] = c.history[chatID][excess:]
 	}
 	return rec
+}
+
+// route applies the resident/ephemeral split when the warden is enabled.
+func (c *Channel) route(ctx context.Context, principal *aep.Principal) (string, error) {
+	if c.warden == nil {
+		return "", nil
+	}
+	return c.warden.Route(ctx, principal)
+}
+
+// proxyTo forwards one chat request to an ephemeral fork verbatim: the fork
+// re-authenticates the requester's token through the identical path.
+func (c *Channel) proxyTo(w http.ResponseWriter, r *http.Request, target string) {
+	url := target + r.URL.Path
+	if r.URL.RawQuery != "" {
+		url += "?" + r.URL.RawQuery
+	}
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, url, r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "PROXY_FAILED", err.Error())
+		return
+	}
+	req.Header.Set("Authorization", r.Header.Get("Authorization"))
+	if contentType := r.Header.Get("Content-Type"); contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "PROXY_FAILED", err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 func urlPathUnescape(segment string) (string, error) {

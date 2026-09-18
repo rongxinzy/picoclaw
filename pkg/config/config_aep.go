@@ -17,6 +17,15 @@ type AEPConfig struct {
 	Password       SecureString `json:"password,omitzero"        yaml:"password,omitempty" env:"PICOCLAW_AEP_PASSWORD"`
 	SessionID      string       `json:"session_id,omitempty"     yaml:"-"                  env:"PICOCLAW_AEP_SESSION_ID"`
 	GatewayBaseURL string       `json:"gateway_base_url,omitempty" yaml:"-"                 env:"PICOCLAW_AEP_GATEWAY_BASE_URL"`
+	// HomeTeamID anchors the warden's hierarchy comparison: requesters whose
+	// teams lie strictly inside this team's subtree converse with scoped
+	// ephemeral forks instead of the resident instance.
+	HomeTeamID string `json:"home_team_id,omitempty" yaml:"-" env:"PICOCLAW_AEP_HOME_TEAM_ID"`
+	// Supervisor credentials carry the ephemeral lifecycle authority
+	// (users.write). Deliberately separate from the digital employee account,
+	// which never holds provisioning rights.
+	SupervisorUsername string       `json:"supervisor_username,omitempty" yaml:"-"                  env:"PICOCLAW_AEP_SUPERVISOR_USERNAME"`
+	SupervisorPassword SecureString `json:"supervisor_password,omitzero"  yaml:"password,omitempty" env:"PICOCLAW_AEP_SUPERVISOR_PASSWORD"`
 }
 
 // IsComplete reports whether the mandatory connection fields are present.
@@ -29,4 +38,23 @@ func (c AEPConfig) IsComplete() bool {
 // verified against the control-service JWKS.
 type AEPChatSettings struct {
 	HistoryLimit int `json:"history_limit,omitempty" yaml:"history_limit,omitempty" env:"PICOCLAW_CHANNELS_AEPCHAT_HISTORY_LIMIT"`
+	// Warden enables the resident/ephemeral conversation split: requesters
+	// inside the home-team subtree (strictly below) are served by scoped
+	// ephemeral forks spawned on demand.
+	Warden *WardenSettings `json:"warden,omitempty" yaml:"-" env:"-"`
+}
+
+// WardenSettings configures ephemeral fork spawning.
+type WardenSettings struct {
+	// RuntimeRoleID is granted to every ephemeral fork (models/skills/data
+	// scope read). Required.
+	RuntimeRoleID string `json:"runtime_role_id" yaml:"-"`
+	// PromptSkillID carries the department persona onto the fork. Optional.
+	PromptSkillID string `json:"prompt_skill_id,omitempty" yaml:"-"`
+	// TTLMinutes bounds an idle fork's lifetime (default 30). The AEP-side
+	// hard expiry is always applied on top.
+	TTLMinutes int `json:"ttl_minutes,omitempty" yaml:"-"`
+	// PortRangeStart allocates child gateway ports from this value upwards
+	// (default 18900).
+	PortRangeStart int `json:"port_range_start,omitempty" yaml:"-"`
 }
