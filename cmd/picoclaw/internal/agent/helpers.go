@@ -12,10 +12,12 @@ import (
 	"github.com/ergochat/readline"
 
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal"
+	"github.com/sipeed/picoclaw/pkg/aep"
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 func agentCmd(message, sessionKey, model string, debug bool) error {
@@ -41,8 +43,10 @@ func agentCmd(message, sessionKey, model string, debug bool) error {
 
 	// Digital-employee binding: start the AEP session (identity, model
 	// catalog, rotating gateway token) before any provider is constructed.
+	var aepManager *aep.Manager
 	if cfg.AEP.Enabled {
-		aepManager, aepErr := providers.StartAEPSession(cfg)
+		var aepErr error
+		aepManager, aepErr = providers.StartAEPSession(cfg)
 		if aepErr != nil {
 			return fmt.Errorf("error starting AEP session: %w", aepErr)
 		}
@@ -63,6 +67,9 @@ func agentCmd(message, sessionKey, model string, debug bool) error {
 	defer msgBus.Close()
 	agentLoop := agent.NewAgentLoop(cfg, msgBus, provider)
 	defer agentLoop.Close()
+	if aepManager != nil {
+		agentLoop.RegisterTool(tools.NewDeptDataTool(aepManager))
+	}
 
 	// Print agent startup info (only for interactive mode)
 	startupInfo := agentLoop.GetStartupInfo()

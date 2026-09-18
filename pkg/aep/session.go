@@ -435,3 +435,18 @@ func (m *Manager) GatewayBaseURL() (string, error) {
 	}
 	return m.gatewayBaseURL, nil
 }
+
+// DataScopeContext resolves the retrieval context of one deployment user
+// using the digital employee's own session. It fails closed: without a valid
+// session there is no authorization answer.
+func (m *Manager) DataScopeContext(ctx context.Context, userID string) (*RetrievalContext, error) {
+	accessToken, err := m.AccessToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out, p := m.client.DataScopeContext(ctx, accessToken, userID)
+	if p != nil {
+		return nil, p
+	}
+	return out, nil
+}

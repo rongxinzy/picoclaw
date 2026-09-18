@@ -20,6 +20,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/audio/tts"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
+	_ "github.com/sipeed/picoclaw/pkg/channels/aepchat"
 	_ "github.com/sipeed/picoclaw/pkg/channels/dingtalk"
 	_ "github.com/sipeed/picoclaw/pkg/channels/discord"
 	_ "github.com/sipeed/picoclaw/pkg/channels/feishu"
@@ -215,6 +216,10 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	msgBus := bus.NewMessageBus()
 	agentLoop := agent.NewAgentLoop(cfg, msgBus, provider)
 	msgBus.SetEventPublisher(agentLoop.RuntimeEventBus())
+	if aepManager != nil {
+		// Delegated department-data queries, scoped to the requester.
+		agentLoop.RegisterTool(tools.NewDeptDataTool(aepManager))
+	}
 	publishGatewayEvent(agentLoop, runtimeevents.KindGatewayStart, startedAt, nil)
 
 	fmt.Println("\n📦 Agent Status:")

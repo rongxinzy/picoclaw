@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -176,6 +177,40 @@ func (c *Client) Models(ctx context.Context, accessToken string) ([]Model, *Prob
 func (c *Client) Metadata(ctx context.Context) (*Metadata, *Problem) {
 	var out Metadata
 	if p := c.get(ctx, "/aep/v1/metadata", "", &out); p != nil {
+		return nil, p
+	}
+	return &out, nil
+}
+
+// ResourceRef is one (kind, id) resource reference in a retrieval context.
+type ResourceRef struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+}
+
+// RetrievalContext is the data-scope evaluation result for one user: the
+// subtree of visible teams plus explicit allow/deny references. An explicit
+// deny always wins over an allow.
+type RetrievalContext struct {
+	PrincipalID           string        `json:"principalId"`
+	DeploymentID          string        `json:"deploymentId"`
+	OrgScope              []string      `json:"orgScope"`
+	OwnTeamIDs            []string      `json:"ownTeamIds"`
+	RoleScope             []string      `json:"roleScope"`
+	AllowedResources      []ResourceRef `json:"allowedResources"`
+	DeniedResources       []ResourceRef `json:"deniedResources"`
+	CrossDepartmentReason string        `json:"crossDepartmentReason,omitempty"`
+}
+
+// DataScopeContext resolves the retrieval context of one user. The caller
+// needs the data_scope.read permission (granted to digital-employee runtime
+// roles); userId may be any user of the deployment, enabling delegation:
+// the runtime answers with what the requester may see, not what the agent
+// itself may see.
+func (c *Client) DataScopeContext(ctx context.Context, accessToken, userID string) (*RetrievalContext, *Problem) {
+	var out RetrievalContext
+	path := "/aep/v1/admin/data-scope/context?userId=" + url.QueryEscape(userID)
+	if p := c.get(ctx, path, accessToken, &out); p != nil {
 		return nil, p
 	}
 	return &out, nil

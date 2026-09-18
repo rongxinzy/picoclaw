@@ -23,3 +23,10 @@ type AEPConfig struct {
 func (c AEPConfig) IsComplete() bool {
 	return c.BaseURL != "" && c.DeploymentID != "" && c.Username != "" && c.Password.String() != ""
 }
+
+// AEPChatSettings configures the aepchat web-chat channel. The channel has
+// no secrets of its own: authentication is the requester's AEP access token,
+// verified against the control-service JWKS.
+type AEPChatSettings struct {
+	HistoryLimit int `json:"history_limit,omitempty" yaml:"history_limit,omitempty" env:"PICOCLAW_CHANNELS_AEPCHAT_HISTORY_LIMIT"`
+}
