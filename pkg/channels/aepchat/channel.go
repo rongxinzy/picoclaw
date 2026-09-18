@@ -90,7 +90,7 @@ func New(channelName string, bc *config.Channel, settings *config.AEPChatSetting
 	}
 	ch.SetOwner(ch)
 	if settings != nil && settings.Warden != nil {
-		supervisor, err := NewSupervisor(&cfg.AEP, settings.Warden)
+		supervisor, err := NewSupervisor(cfg, settings.Warden)
 		if err != nil {
 			return nil, err
 		}

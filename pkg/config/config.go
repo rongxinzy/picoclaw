@@ -42,6 +42,7 @@ type Config struct {
 	Channels  ChannelsConfig  `json:"channel_list"        yaml:"channel_list"`
 	ModelList SecureModelList `json:"model_list"          yaml:"model_list"` // New model-centric provider configuration
 	AEP       AEPConfig       `json:"aep"                 yaml:"aep"`        // AEP digital-employee session binding
+	Knowledge KnowledgeConfig `json:"knowledge,omitempty" yaml:"knowledge"`  // WeKnora knowledge binding
 	Gateway   GatewayConfig   `json:"gateway"             yaml:"-"`
 	Events    EventsConfig    `json:"events,omitempty"    yaml:"-"`
 	Hooks     HooksConfig     `json:"hooks,omitempty"     yaml:"-"`

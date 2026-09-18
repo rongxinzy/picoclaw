@@ -131,10 +131,10 @@ func TestWardenFailsClosedOnUnresolvableRequesterScope(t *testing.T) {
 }
 
 func TestSupervisorValidatesConfiguration(t *testing.T) {
-	if _, err := NewSupervisor(&config.AEPConfig{Enabled: true}, nil); err == nil {
+	if _, err := NewSupervisor(&config.Config{AEP: config.AEPConfig{Enabled: true}}, nil); err == nil {
 		t.Fatal("missing warden settings should fail")
 	}
-	if _, err := NewSupervisor(&config.AEPConfig{Enabled: true}, &config.WardenSettings{RuntimeRoleID: "runner"}); err == nil {
+	if _, err := NewSupervisor(&config.Config{AEP: config.AEPConfig{Enabled: true}}, &config.WardenSettings{RuntimeRoleID: "runner"}); err == nil {
 		t.Fatal("missing supervisor credentials should fail")
 	}
 }

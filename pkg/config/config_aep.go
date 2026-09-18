@@ -58,3 +58,16 @@ type WardenSettings struct {
 	// (default 18900).
 	PortRangeStart int `json:"port_range_start,omitempty" yaml:"-"`
 }
+
+// KnowledgeConfig binds the digital employee to a WeKnora knowledge
+// deployment. Authorization stays in AEP (the PEP tool filters per
+// requester); the WeKnora API key is a deployment-scoped secret whose KB
+// restriction acts as defense in depth, never as the permission model.
+type KnowledgeConfig struct {
+	Enabled   bool                `json:"enabled"                    yaml:"enabled"      env:"PICOCLAW_KNOWLEDGE_ENABLED"`
+	BaseURL   string              `json:"base_url,omitempty"         yaml:"-"            env:"PICOCLAW_KNOWLEDGE_BASE_URL"`
+	APIKey    SecureString        `json:"api_key,omitzero"           yaml:"api_key,omitempty" env:"PICOCLAW_KNOWLEDGE_API_KEY"`
+	TeamKBMap map[string][]string `json:"team_kb_map,omitempty"     yaml:"-"`
+	// MaxPassages bounds one tool result (default 5).
+	MaxPassages int `json:"max_passages,omitempty" yaml:"-"`
+}

@@ -69,6 +69,9 @@ func agentCmd(message, sessionKey, model string, debug bool) error {
 	defer agentLoop.Close()
 	if aepManager != nil {
 		agentLoop.RegisterTool(tools.NewDeptDataTool(aepManager))
+		if cfg.Knowledge.Enabled {
+			agentLoop.RegisterTool(tools.NewKnowledgeSearchTool(aepManager, &cfg.Knowledge))
+		}
 	}
 
 	// Print agent startup info (only for interactive mode)

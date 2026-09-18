@@ -60,6 +60,7 @@ type Supervisor struct {
 	deploymentID string
 	homeTeamID   string
 	settings     *config.WardenSettings
+	knowledge    *config.KnowledgeConfig
 
 	supervisor *aep.Manager // session carrying lifecycle authority
 
@@ -70,16 +71,16 @@ type Supervisor struct {
 }
 
 // NewSupervisor logs the supervisor account in and starts the reaper.
-func NewSupervisor(cfg *config.AEPConfig, settings *config.WardenSettings) (*Supervisor, error) {
+func NewSupervisor(cfg *config.Config, settings *config.WardenSettings) (*Supervisor, error) {
 	if settings == nil || settings.RuntimeRoleID == "" {
 		return nil, fmt.Errorf("aepchat warden requires warden.runtime_role_id")
 	}
-	if cfg.SupervisorUsername == "" || cfg.SupervisorPassword.String() == "" {
+	if cfg.AEP.SupervisorUsername == "" || cfg.AEP.SupervisorPassword.String() == "" {
 		return nil, fmt.Errorf("aepchat warden requires aep.supervisor_username and aep.supervisor_password")
 	}
 	supervisor := aep.NewManager(aep.Config{
-		BaseURL: cfg.BaseURL, DeploymentID: cfg.DeploymentID,
-		Username: cfg.SupervisorUsername, Password: cfg.SupervisorPassword.String(),
+		BaseURL: cfg.AEP.BaseURL, DeploymentID: cfg.AEP.DeploymentID,
+		Username: cfg.AEP.SupervisorUsername, Password: cfg.AEP.SupervisorPassword.String(),
 		SessionID: "picoclaw-supervisor", Logger: supervisorLogger{},
 	})
 	if err := supervisor.Start(context.Background()); err != nil {
@@ -94,9 +95,10 @@ func NewSupervisor(cfg *config.AEPConfig, settings *config.WardenSettings) (*Sup
 	if settings.PortRangeStart > 0 {
 		portRange = settings.PortRangeStart
 	}
+	knowledge := &cfg.Knowledge
 	s := &Supervisor{
-		client: aep.NewClient(cfg.BaseURL), baseURL: cfg.BaseURL, deploymentID: cfg.DeploymentID,
-		homeTeamID: cfg.HomeTeamID, settings: settings,
+		client: aep.NewClient(cfg.AEP.BaseURL), baseURL: cfg.AEP.BaseURL, deploymentID: cfg.AEP.DeploymentID,
+		homeTeamID: cfg.AEP.HomeTeamID, settings: settings, knowledge: knowledge,
 		supervisor: supervisor, forks: make(map[string]*fork),
 		nextPort: portRange, binary: binary,
 	}
@@ -223,6 +225,10 @@ func (s *Supervisor) launchChild(ctx context.Context, fork *fork) error {
 		},
 		"channel_list": map[string]any{"aepchat": map[string]any{"enabled": true, "type": "aepchat"}},
 		"model_list":   []any{},
+		"knowledge": map[string]any{
+			"enabled": s.knowledge.Enabled, "base_url": s.knowledge.BaseURL,
+			"team_kb_map": s.knowledge.TeamKBMap, "max_passages": s.knowledge.MaxPassages,
+		},
 		"agents": map[string]any{"defaults": map[string]any{
 			"workspace":             filepath.Join(fork.homeDir, "workspace"),
 			"restrict_to_workspace": true, "max_tokens": 1024, "max_tool_iterations": 6,
@@ -240,6 +246,7 @@ func (s *Supervisor) launchChild(ctx context.Context, fork *fork) error {
 	cmd.Env = append(os.Environ(),
 		"PICOCLAW_HOME="+fork.homeDir,
 		"PICOCLAW_AEP_PASSWORD="+fork.password,
+		"PICOCLAW_KNOWLEDGE_API_KEY="+s.knowledge.APIKey.String(),
 	)
 	cmd.Stdout = nil
 	cmd.Stderr = nil

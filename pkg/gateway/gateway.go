@@ -219,6 +219,10 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	if aepManager != nil {
 		// Delegated department-data queries, scoped to the requester.
 		agentLoop.RegisterTool(tools.NewDeptDataTool(aepManager))
+		if cfg.Knowledge.Enabled {
+			// Knowledge retrieval PEP: requester-scoped WeKnora search.
+			agentLoop.RegisterTool(tools.NewKnowledgeSearchTool(aepManager, &cfg.Knowledge))
+		}
 	}
 	publishGatewayEvent(agentLoop, runtimeevents.KindGatewayStart, startedAt, nil)
 
