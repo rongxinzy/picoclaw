@@ -25,6 +25,16 @@ type ModelProviderOption struct {
 }
 
 var modelProviderOptionsByName = map[string]ModelProviderOption{
+	"aep": {
+		ID:                  "aep",
+		DisplayName:         "AEP Model Gateway",
+		DefaultAPIBase:      "",   // deployment-defined; resolved from AEP service metadata
+		EmptyAPIKeyAllowed:  true, // bearer token comes from the AEP session, not config
+		CreateAllowed:       true,
+		DefaultModelAllowed: true,
+		Priority:            50,
+		httpAPI:             true,
+	},
 	"openai": {
 		ID:                  "openai",
 		DisplayName:         "OpenAI",

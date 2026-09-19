@@ -42,6 +42,10 @@ type Provider struct {
 	extraBody      map[string]any // Additional fields to inject into request body
 	customHeaders  map[string]string
 	userAgent      string
+	// tokenSource, when set, supplies the bearer token per request and
+	// overrides apiKey. Used for short-lived rotating credentials (e.g. an
+	// AEP model access token).
+	tokenSource func(ctx context.Context) (string, error)
 }
 
 type Option func(*Provider)
@@ -107,6 +111,27 @@ func WithProviderName(providerName string) Option {
 	return func(p *Provider) {
 		p.providerName = strings.ToLower(strings.TrimSpace(providerName))
 	}
+}
+
+// WithTokenSource overrides the static API key with a per-request token
+// resolver. A nil source keeps the static key behavior.
+func WithTokenSource(tokenSource func(ctx context.Context) (string, error)) Option {
+	return func(p *Provider) {
+		p.tokenSource = tokenSource
+	}
+}
+
+// resolveToken returns the bearer token for one request. A token source
+// error fails the request rather than falling back to a stale static key.
+func (p *Provider) resolveToken(ctx context.Context) (string, error) {
+	if p.tokenSource == nil {
+		return p.apiKey, nil
+	}
+	tok, err := p.tokenSource(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolving bearer token: %w", err)
+	}
+	return tok, nil
 }
 
 func NewProvider(apiKey, apiBase, proxy string, opts ...Option) *Provider {
@@ -484,8 +509,12 @@ func (p *Provider) Chat(
 	if p.userAgent != "" {
 		req.Header.Set("User-Agent", p.userAgent)
 	}
-	if p.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	bearer, err := p.resolveToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	p.applyCustomHeaders(req)
 
@@ -556,8 +585,12 @@ func (p *Provider) ChatStreamEvents(
 	if p.userAgent != "" {
 		req.Header.Set("User-Agent", p.userAgent)
 	}
-	if p.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	bearer, err := p.resolveToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	p.applyCustomHeaders(req)
 

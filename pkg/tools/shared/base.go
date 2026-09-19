@@ -50,6 +50,8 @@ var (
 	ctxKeyAgentID          = &toolCtxKey{"agentID"}
 	ctxKeySessionKey       = &toolCtxKey{"sessionKey"}
 	ctxKeySessionScope     = &toolCtxKey{"sessionScope"}
+	ctxKeySenderID         = &toolCtxKey{"senderID"}
+	ctxKeySenderName       = &toolCtxKey{"senderName"}
 )
 
 // WithToolContext returns a child context carrying channel and chatID.
@@ -140,6 +142,32 @@ func ToolSessionKey(ctx context.Context) string {
 		return ""
 	}
 	return v
+}
+
+// WithToolSenderContext attaches the current turn's requester identity to
+// the tool context. Unlike the session-scope "sender" dimension, this is
+// injected deterministically for every turn, so authorization-bearing tools
+// do not depend on session-dimension configuration.
+func WithToolSenderContext(ctx context.Context, senderID, senderName string) context.Context {
+	ctx = context.WithValue(ctx, ctxKeySenderID, senderID)
+	ctx = context.WithValue(ctx, ctxKeySenderName, senderName)
+	return ctx
+}
+
+// ToolSenderID returns the requester id of the current turn, if known.
+func ToolSenderID(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxKeySenderID).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// ToolSenderDisplayName returns the requester display name, if known.
+func ToolSenderDisplayName(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxKeySenderName).(string); ok {
+		return v
+	}
+	return ""
 }
 
 // ToolSessionScope extracts the active turn's structured session scope from ctx.

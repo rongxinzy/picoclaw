@@ -200,6 +200,34 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 		}
 		return finalizeProviderFromConfig(provider, modelID, cfg)
 
+	case "aep":
+		// AEP digital-employee models: OpenAI-compatible gateway authorized by
+		// the session's rotating model access token. No static api_key exists;
+		// the gateway registers the token source when the AEP session starts.
+		tokenSource := getAEPTokenSource()
+		if tokenSource == nil {
+			return nil, "", fmt.Errorf("aep provider requires a running AEP session (enable aep.enabled in config)")
+		}
+		apiBase := strings.TrimSpace(cfg.APIBase)
+		if apiBase == "" {
+			apiBase = getDefaultAPIBase(protocol)
+		}
+		if apiBase == "" {
+			return nil, "", fmt.Errorf("api_base is required for aep protocol (set aep.gateway_base_url or run against live AEP metadata)")
+		}
+		provider := NewHTTPProviderWithTokenSource(
+			apiBase,
+			cfg.Proxy,
+			cfg.MaxTokensField,
+			userAgent,
+			cfg.RequestTimeout,
+			cfg.ExtraBody,
+			cfg.CustomHeaders,
+			tokenSource,
+		)
+		provider.SetProviderName("aep")
+		return finalizeProviderFromConfig(provider, modelID, cfg)
+
 	case "litellm", "lmstudio", "gpt4free", "openrouter", "groq", "zhipu", "nvidia", "venice",
 		"nearai", "ollama", "moonshot", "shengsuanyun", "siliconflow", "deepseek", "cerebras",
 		"vivgrid", "volcengine", "vllm", "qwen-portal", "qwen-intl", "qwen-us", "mistral",
