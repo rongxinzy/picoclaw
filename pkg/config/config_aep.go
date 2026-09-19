@@ -59,6 +59,20 @@ type WardenSettings struct {
 	PortRangeStart int `json:"port_range_start,omitempty" yaml:"-"`
 }
 
+// A2AConfig names the peers this digital employee may invoke.
+type A2AConfig struct {
+	Peers map[string]string `json:"peers,omitempty" yaml:"-"` // peer name → base URL
+}
+
+// A2ASettings configures the agent-to-agent endpoint channel.
+type A2ASettings struct {
+	// PublicURL is advertised in the agent card (peers call it).
+	PublicURL string `json:"public_url,omitempty" yaml:"-"`
+	// MaxChainDepth bounds the delegation chain including this hop
+	// (default 3), structurally preventing agent ping-pong loops.
+	MaxChainDepth int `json:"max_chain_depth,omitempty" yaml:"-"`
+}
+
 // KnowledgeConfig binds the digital employee to a WeKnora knowledge
 // deployment. Authorization stays in AEP (the PEP tool filters per
 // requester); the WeKnora API key is a deployment-scoped secret whose KB
