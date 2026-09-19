@@ -68,6 +68,10 @@ type Supervisor struct {
 	forks    map[string]*fork // requester user id → fork
 	nextPort int
 	binary   string
+	// healthTimeout bounds the child health probe; swappable in tests.
+	healthTimeout time.Duration
+	// reapInterval paces the expiry sweep; swappable in tests.
+	reapInterval time.Duration
 }
 
 // NewSupervisor logs the supervisor account in and starts the reaper.
@@ -100,7 +104,10 @@ func NewSupervisor(cfg *config.Config, settings *config.WardenSettings) (*Superv
 		client: aep.NewClient(cfg.AEP.BaseURL), baseURL: cfg.AEP.BaseURL, deploymentID: cfg.AEP.DeploymentID,
 		homeTeamID: cfg.AEP.HomeTeamID, settings: settings, knowledge: knowledge,
 		supervisor: supervisor, forks: make(map[string]*fork),
-		nextPort: portRange, binary: binary,
+		nextPort: portRange, binary: binary, healthTimeout: childHealthTimeout,
+	}
+	if s.reapInterval <= 0 {
+		s.reapInterval = time.Minute
 	}
 	go s.reaper(context.Background())
 	return s, nil
@@ -258,7 +265,11 @@ func (s *Supervisor) launchChild(ctx context.Context, fork *fork) error {
 }
 
 func (s *Supervisor) waitHealthy(ctx context.Context, fork *fork) error {
-	deadline := time.Now().Add(childHealthTimeout)
+	timeout := s.healthTimeout
+	if timeout <= 0 {
+		timeout = childHealthTimeout
+	}
+	deadline := time.Now().Add(timeout)
 	url := fork.URL() + "/aepchat/v1/health"
 	for time.Now().Before(deadline) {
 		select {
@@ -266,7 +277,8 @@ func (s *Supervisor) waitHealthy(ctx context.Context, fork *fork) error {
 			return ctx.Err()
 		default:
 		}
-		resp, err := http.Get(url)
+		probe := &http.Client{Timeout: time.Second}
+		resp, err := probe.Get(url)
 		if err == nil {
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
@@ -283,7 +295,7 @@ func (s *Supervisor) clientBaseURL() string { return s.baseURL }
 // reaper terminates forks whose TTL passed or that have been idle too long,
 // revoking their sessions and deleting their accounts.
 func (s *Supervisor) reaper(ctx context.Context) {
-	ticker := time.NewTicker(time.Minute)
+	ticker := time.NewTicker(s.reapInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -310,7 +322,9 @@ func (s *Supervisor) reaper(ctx context.Context) {
 // its account. Failures are logged, not fatal: the AEP-side hard expiry is
 // the backstop.
 func (s *Supervisor) cleanupAccount(ctx context.Context, fork *fork) {
-	fork.cancel()
+	if fork.cancel != nil {
+		fork.cancel()
+	}
 	token, err := s.supervisor.AccessToken(ctx)
 	if err == nil {
 		if p := s.client.RevokeSession(ctx, token, fork.sessionID); p != nil {

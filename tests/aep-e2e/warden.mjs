@@ -66,6 +66,22 @@ try {
   if ((await forkCount()) - baseline !== 1) throw new Error('peer chat must not spawn additional forks');
   console.log('PASS W2 peer reaches resident without spawning a fork');
 
+  // W3 — fork reuse across chats: a second conversation from the same
+  // subordinate must not spawn a second fork.
+  await converse('W3 second chat reuses the fork', sub, resident, `w3-${runId}`,
+    'Say hello', /Hello AEP/, 120_000);
+  if ((await forkCount()) - baseline !== 1) throw new Error('W3: second chat spawned an extra fork');
+  console.log('PASS W3 fork reused across chats');
+
+  // W4 — knowledge through the fork is scoped to the frozen snapshot: the
+  // subordinate asks for the sibling department's knowledge and is denied.
+  if (process.env.WEKNORA_API_KEY && process.env.WEKNORA_KB_RD && process.env.WEKNORA_KB_HR) {
+    const deniedKnowledge = await converse('W4 fork knowledge stays in scope', sub, resident, `w4-${runId}`,
+      'AEP_KNOWLEDGE_SEARCH KNQ:薪酬等级 请查薪酬',
+      body => body.includes('AEP_KNOWLEDGE_OK') && !body.includes('P6月薪'), 150_000);
+    console.log('PASS W4 fork knowledge stays in the requester scope');
+  }
+
   console.log('ALL WARDEN E2E SCENARIOS PASSED');
 } catch (error) {
   console.error('WARDEN E2E FAILED:', error.message);
@@ -191,6 +207,14 @@ async function launchResident(org) {
     channel_list: {aepchat: {enabled: true, type: 'aepchat', settings: {
       warden: {runtime_role_id: org.runnerRole, ttl_minutes: 20},
     }}},
+    ...(process.env.WEKNORA_API_KEY ? {knowledge: {
+      enabled: true, base_url: process.env.WEKNORA_BASE_URL ?? 'http://localhost:8092', max_passages: 3,
+      team_kb_map: {
+        [org.teams.home]: [process.env.WEKNORA_KB_HR],
+        [org.teams.child]: [process.env.WEKNORA_KB_RD],
+        [org.teams.sibling]: [],
+      },
+    }} : {}),
     model_list: [],
     agents: {defaults: {
       workspace: path.join(home, 'workspace'), restrict_to_workspace: true,
@@ -199,7 +223,10 @@ async function launchResident(org) {
     gateway: {host: '127.0.0.1', port},
   }, null, 2));
   const proc = spawn(bin, ['gateway'], {
-    env: {...process.env, PICOCLAW_HOME: home, PICOCLAW_AEP_PASSWORD: 'resident-password-123'},
+    env: {
+      ...process.env, PICOCLAW_HOME: home, PICOCLAW_AEP_PASSWORD: 'resident-password-123',
+      ...(process.env.WEKNORA_API_KEY ? {PICOCLAW_KNOWLEDGE_API_KEY: process.env.WEKNORA_API_KEY} : {}),
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   proc.stdout.on('data', () => {});

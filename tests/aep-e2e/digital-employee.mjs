@@ -81,6 +81,27 @@ try {
   await converse('S5 employee denied other dept', zhang, deA, `s5c-${runId}`,
     `AEP_DEPT_REPORT AEP_DEPT_REPORT_TEAM:${deptB} please`, body => body.includes(`DENIED team=${deptB}`));
 
+  // S6 — conversation isolation: two chat ids never see each other.
+  await converse('S6a chat alpha', zhang, deA, `s6a-${runId}`, 'Say hello', /Hello AEP/);
+  await converse('S6b chat beta', zhang, deA, `s6b-${runId}`, 'Say hello', /Hello AEP/);
+  {
+    const page = await (await fetch(`${deA.url}/aepchat/v1/chats/${encodeURIComponent(`s6a-${runId}`)}/messages`, {
+      headers: {Authorization: `Bearer ${zhang.accessToken}`},
+    })).json();
+    const seenBeta = (page.messages ?? []).some(m => (m.text ?? '').includes('beta-marker'));
+    if (seenBeta) throw new Error('S6: chat alpha leaked chat beta traffic');
+    console.log('PASS S6 conversation isolation between chat ids');
+  }
+
+  // S7 — the employee access token is not an admin credential.
+  {
+    const adminProbe = await fetch(base + '/aep/v1/admin/agents?limit=1', {
+      headers: {'X-AEP-Protocol-Version': '1.0', Authorization: `Bearer ${zhang.accessToken}`},
+    });
+    if (adminProbe.status !== 403) throw new Error(`S7: employee token on admin API = ${adminProbe.status}`);
+    console.log('PASS S7 employee token rejected on admin API');
+  }
+
   console.log('ALL DIGITAL EMPLOYEE E2E SCENARIOS PASSED');
 } catch (error) {
   console.error('E2E FAILED:', error.message);

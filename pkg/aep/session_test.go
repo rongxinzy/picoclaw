@@ -18,12 +18,13 @@ const loginBody = `{"accessToken":"at-1","refreshToken":"rt-1","modelAccessToken
 // newAEPTestServer serves a login/refresh/metadata/models/heartbeat flow and
 // records which endpoints were hit.
 type aepTestServer struct {
-	mu          sync.Mutex
-	logins      int
-	refreshes   int
-	heartbeats  int
-	refreshCode int // 0 = success; otherwise HTTP status for refresh
-	server      *httptest.Server
+	mu            sync.Mutex
+	logins        int
+	refreshes     int
+	heartbeats    int
+	refreshCode   int // 0 = success; otherwise HTTP status for refresh
+	heartbeatCode int
+	server        *httptest.Server
 }
 
 func newAEPTestServer(t *testing.T) *aepTestServer {
@@ -50,8 +51,21 @@ func newAEPTestServer(t *testing.T) *aepTestServer {
 			_, _ = io.WriteString(w, `{"service":"aep-control-service","deploymentId":"demo","modelGateway":{"baseUrl":"https://gw.example.test/v1","protocol":"openai-compatible"}}`)
 		case "/aep/v1/user/models":
 			_, _ = io.WriteString(w, `{"models":[{"id":"qwen","displayName":"Qwen","enabled":true}]}`)
+		case "/aep/v1/user/me":
+			_, _ = io.WriteString(w, `{"user":{"id":"picoclaw-test","displayName":"Helper","kind":"agent"},"deploymentId":"demo","roles":[]}`)
+		case "/aep/v1/admin/data-scope/context":
+			if r.URL.Query().Get("userId") == "picoclaw-test" {
+				_, _ = io.WriteString(w, `{"principalId":"picoclaw-test","deploymentId":"demo","orgScope":["dept-a"],"ownTeamIds":["dept-a"],"roleScope":[]}`)
+			} else {
+				_, _ = io.WriteString(w, `{"principalId":"user-a","deploymentId":"demo","orgScope":["dept-a","dept-b"],"ownTeamIds":["dept-a"],"roleScope":[]}`)
+			}
 		case "/aep/v1/user/heartbeat":
 			s.heartbeats++
+			if s.heartbeatCode != 0 {
+				w.WriteHeader(s.heartbeatCode)
+				_, _ = io.WriteString(w, fmt.Sprintf(`{"title":"Denied","status":%d,"code":"TOKEN_INVALID"}`, s.heartbeatCode))
+				return
+			}
 			_, _ = io.WriteString(w, `{"serverTime":"2026-09-18T08:00:00Z","controlEvents":{"pending":false,"watermark":"0"},"nextHeartbeatAfterSeconds":60}`)
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
@@ -72,6 +86,12 @@ func (s *aepTestServer) setRefreshStatus(code int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refreshCode = code
+}
+
+func (s *aepTestServer) setHeartbeatStatus(code int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.heartbeatCode = code
 }
 
 func newTestManager(t *testing.T, baseURL string) *Manager {
@@ -242,5 +262,70 @@ func TestLoginBodyNeverLeaksIntoErrorStrings(t *testing.T) {
 	}
 	if strings.Contains(string(serialized), "agent-password-123") {
 		t.Fatalf("password leaked into error: %s", serialized)
+	}
+}
+
+func TestManagerScopeSelfAndRegistry(t *testing.T) {
+	fake := newAEPTestServer(t)
+	m := newTestManager(t, fake.server.URL)
+
+	SetDefaultManager(m)
+	t.Cleanup(func() { SetDefaultManager(nil) })
+	if DefaultManager() != m {
+		t.Fatal("default manager registry round-trip failed")
+	}
+
+	if got, err := m.DataScopeContext(context.Background(), "user-a"); err != nil || got.PrincipalID != "user-a" {
+		t.Fatalf("Manager.DataScopeContext = %+v, %v", got, err)
+	}
+	if got, err := m.SelfUserID(context.Background()); err != nil || got != "picoclaw-test" {
+		t.Fatalf("SelfUserID = %q, %v", got, err)
+	}
+	self, err := m.SelfContext(context.Background())
+	if err != nil || self.PrincipalID != "picoclaw-test" {
+		t.Fatalf("SelfContext = %+v, %v", self, err)
+	}
+	// SelfContext caches: the second call must not refetch.
+	if _, err := m.SelfContext(context.Background()); err != nil {
+		t.Fatalf("cached SelfContext: %v", err)
+	}
+}
+
+func TestRefreshModelsReturnsErrors(t *testing.T) {
+	fake := newAEPTestServer(t)
+	m := newTestManager(t, fake.server.URL)
+	if _, err := m.RefreshModels(context.Background()); err != nil {
+		t.Fatalf("refresh against a healthy server must succeed: %v", err)
+	}
+
+	dead := Config{
+		BaseURL: "http://127.0.0.1:1", DeploymentID: "demo",
+		Username: "helper", Password: "agent-password-123", SessionID: "t",
+	}
+	offline := NewManager(dead)
+	t.Cleanup(offline.Stop)
+	if err := offline.Start(context.Background()); err == nil {
+		t.Fatal("expected login failure against a dead endpoint")
+	}
+}
+
+func TestBeatRecoversFromAuthFailure(t *testing.T) {
+	fake := newAEPTestServer(t)
+	m := newTestManager(t, fake.server.URL)
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// An auth-rejected heartbeat triggers the recovery refresh, which
+	// succeeds against the fake and keeps the manager usable.
+	current := time.Now()
+	m.now = func() time.Time { return current }
+	current = current.Add(3600 * time.Second)
+	fake.setHeartbeatStatus(http.StatusUnauthorized)
+	next := m.beat(context.Background())
+	if next <= 0 {
+		t.Fatalf("beat returned a non-positive interval: %v", next)
+	}
+	if tok, err := m.AccessToken(context.Background()); err != nil || tok == "" {
+		t.Fatalf("post-recovery access token: %q %v", tok, err)
 	}
 }

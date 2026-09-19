@@ -104,3 +104,88 @@ func TestRedactURLStripsQueryStrings(t *testing.T) {
 		t.Fatalf("unexpected redaction: %q", got)
 	}
 }
+
+func TestLifecycleAndScopeClientEndpoints(t *testing.T) {
+	var seenAuth, seenPath string
+	var seenBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuth = r.Header.Get("Authorization")
+		seenPath = r.Method + " " + r.URL.Path
+		if r.Body != nil && r.ContentLength > 0 {
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &seenBody)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case seenPath == "GET /aep/v1/admin/data-scope/context":
+			_, _ = w.Write([]byte(`{"principalId":"u1","deploymentId":"demo","orgScope":["dept-a"],"ownTeamIds":["dept-a"],"roleScope":[]}`))
+		case seenPath == "GET /aep/v1/user/me":
+			_, _ = w.Write([]byte(`{"user":{"id":"u1","displayName":"Zhang","kind":"human"},"deploymentId":"demo","roles":["employee"]}`))
+		case seenPath == "POST /aep/v1/admin/agents":
+			_, _ = w.Write([]byte(`{"id":"agent-9","username":"eph-x","displayName":"Fork","homeTeamId":"dept-a","displayTitle":"","ephemeral":true,"expiresAt":"2030-01-01T00:00:00Z"}`))
+		case seenPath == "DELETE /aep/v1/admin/agents/agent-9":
+			w.WriteHeader(http.StatusNoContent)
+		case seenPath == "POST /aep/v1/admin/sessions/s-1/revoke":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected %s", seenPath)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client := NewClient(server.URL)
+
+	scope, p := client.DataScopeContext(context.Background(), "at", "u1")
+	if p != nil || scope.PrincipalID != "u1" || len(scope.OrgScope) != 1 {
+		t.Fatalf("DataScopeContext = %+v, %v", scope, p)
+	}
+	if seenAuth != "Bearer at" {
+		t.Fatalf("authorization = %q", seenAuth)
+	}
+
+	principal, p := client.CurrentUser(context.Background(), "at")
+	if p != nil || principal.UserID != "u1" || principal.Kind != "human" {
+		t.Fatalf("CurrentUser = %+v, %v", principal, p)
+	}
+
+	record, p := client.CreateAgent(context.Background(), "at", EphemeralAgentInput{
+		Username: "eph-x", DisplayName: "Fork", Password: "long-password-123",
+		RoleIDs: []string{"runner"}, HomeTeamID: "dept-a",
+		Ephemeral: true, ExpiresAt: "2030-01-01T00:00:00Z", ScopeFromUserID: "u1",
+	})
+	if p != nil || record.ID != "agent-9" || !record.Ephemeral {
+		t.Fatalf("CreateAgent = %+v, %v", record, p)
+	}
+	if seenBody["scopeFromUserId"] != "u1" || seenBody["ephemeral"] != true {
+		t.Fatalf("CreateAgent body = %v", seenBody)
+	}
+
+	if p := client.DeleteAgent(context.Background(), "at", "agent-9"); p != nil {
+		t.Fatalf("DeleteAgent: %v", p)
+	}
+	if p := client.RevokeSession(context.Background(), "at", "s-1"); p != nil {
+		t.Fatalf("RevokeSession: %v", p)
+	}
+}
+
+func TestProblemErrorWithoutCode(t *testing.T) {
+	p := &Problem{Title: "boom", Status: 500}
+	if got := p.Error(); got != "aep: boom:  (500)" && !strings.Contains(got, "boom") {
+		t.Fatalf("Error() = %q", got)
+	}
+}
+
+func TestMetadataEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/aep/v1/metadata" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"service":"aep","deploymentId":"demo","modelGateway":{"baseUrl":"https://gw/v1","protocol":"openai-compatible"}}`))
+	}))
+	defer server.Close()
+	meta, p := NewClient(server.URL).Metadata(context.Background())
+	if p != nil || meta.DeploymentID != "demo" || meta.ModelGateway.BaseURL != "https://gw/v1" {
+		t.Fatalf("Metadata = %+v, %v", meta, p)
+	}
+}

@@ -173,3 +173,22 @@ func TestAuthenticateRefreshesJWKSOnUnknownKid(t *testing.T) {
 		t.Fatalf("jwks fetches = %d, want >= 2 (rotation forced a refresh)", got)
 	}
 }
+
+func TestClaimsAccessorsAndDiscardLogger(t *testing.T) {
+	claims := &accessClaims{Issuer: "iss", Subject: "sub", IssuedAt: 1700000000}
+	if got, err := claims.GetIssuer(); got != "iss" || err != nil {
+		t.Fatalf("GetIssuer = %q %v", got, err)
+	}
+	if got, err := claims.GetSubject(); got != "sub" || err != nil {
+		t.Fatalf("GetSubject = %q %v", got, err)
+	}
+	if at, err := claims.GetIssuedAt(); at == nil || err != nil {
+		t.Fatalf("GetIssuedAt = %v %v", at, err)
+	}
+	discardLogger{}.Infof("x %d", 1)
+	discardLogger{}.Warnf("x")
+	discardLogger{}.Errorf("x")
+	if randomSuffix() == "" || len(randomSuffix()) != 8 {
+		t.Fatal("randomSuffix must yield 8 hex chars")
+	}
+}
