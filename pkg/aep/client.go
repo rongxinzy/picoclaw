@@ -334,6 +334,27 @@ func (c *Client) DeleteAgent(ctx context.Context, accessToken, agentID string) *
 	return nil
 }
 
+// TelemetryEvent is one entry of an idempotent event batch upload.
+type TelemetryEvent struct {
+	EventID    string            `json:"eventId"`
+	Type       string            `json:"type"`
+	OccurredAt string            `json:"occurredAt"`
+	Resource   map[string]string `json:"resource"`
+	Result     string            `json:"result"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
+}
+
+// EventsBatch uploads telemetry events (idempotent by eventId).
+func (c *Client) EventsBatch(ctx context.Context, accessToken string, events []TelemetryEvent) *Problem {
+	if len(events) == 0 {
+		return nil
+	}
+	if p := c.post(ctx, "/aep/v1/user/events/batch", accessToken, map[string]any{"events": events}, nil); p != nil {
+		return p
+	}
+	return nil
+}
+
 // RevokeSession revokes one user session (admin API).
 func (c *Client) RevokeSession(ctx context.Context, accessToken, sessionID string) *Problem {
 	if p := c.post(ctx, "/aep/v1/admin/sessions/"+url.PathEscape(sessionID)+"/revoke", accessToken, struct{}{}, nil); p != nil {

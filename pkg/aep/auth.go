@@ -30,6 +30,75 @@ type Principal struct {
 // ErrNotHuman marks a token that belongs to a digital-employee account.
 var ErrNotHuman = errors.New("aep: requester is not a human account")
 
+// ErrMissingPermission marks a peer that lacks the required permission.
+var ErrMissingPermission = errors.New("aep: peer lacks the required permission")
+
+// PeerPrincipal is an authenticated calling agent (or human operator).
+type PeerPrincipal struct {
+	UserID      string
+	DisplayName string
+	Kind        string
+	Roles       []string
+	Permissions []string
+}
+
+// AuthenticatePeer verifies a caller's AEP access token for agent-to-agent
+// surfaces: unlike Authenticate, digital-employee principals are accepted,
+// and the caller must hold requiredPermission (e.g. "agents.invoke").
+func (a *Authenticator) AuthenticatePeer(ctx context.Context, deploymentID, accessToken, requiredPermission string) (*PeerPrincipal, error) {
+	claims, err := a.verifyToken(ctx, deploymentID, accessToken)
+	if err != nil {
+		return nil, err
+	}
+	out, perr := a.resolveIdentityResponse(ctx, accessToken)
+	if perr != nil {
+		return nil, perr
+	}
+	if out.User.ID == "" || out.User.ID != claims.Subject {
+		return nil, errors.New("aep: identity mismatch between token and session")
+	}
+	principal := &PeerPrincipal{
+		UserID: out.User.ID, DisplayName: out.User.DisplayName,
+		Kind: out.User.Kind, Roles: out.Roles, Permissions: out.Permissions,
+	}
+	if requiredPermission != "" {
+		allowed := false
+		for _, permission := range principal.Permissions {
+			if permission == requiredPermission {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return principal, fmt.Errorf("%w: %s", ErrMissingPermission, requiredPermission)
+		}
+	}
+	return principal, nil
+}
+
+func (a *Authenticator) resolveIdentityResponse(ctx context.Context, accessToken string) (*currentUserResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.client.baseURL+"/aep/v1/user/me", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-AEP-Protocol-Version", protocolVersion)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	resp, err := a.client.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("aep: identity resolution failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("aep: identity resolution returned %d", resp.StatusCode)
+	}
+	var out currentUserResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("aep: identity decoding failed: %w", err)
+	}
+	return &out, nil
+}
+
 // Authenticator validates AEP access tokens for one control service.
 // JWT signatures are verified locally against a cached JWKS; identity is
 // resolved once per token via /user/me and memoized until shortly before
@@ -131,6 +200,7 @@ type currentUserResponse struct {
 	} `json:"user"`
 	DeploymentID string   `json:"deploymentId"`
 	Roles        []string `json:"roles"`
+	Permissions  []string `json:"permissions"`
 }
 
 func (a *Authenticator) resolveIdentity(ctx context.Context, accessToken string, claims *accessClaims) (*Principal, error) {

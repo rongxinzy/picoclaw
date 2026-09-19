@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/sipeed/picoclaw/pkg/a2a"
 	"github.com/sipeed/picoclaw/pkg/aep"
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/audio/asr"
@@ -222,6 +223,10 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 		if cfg.Knowledge.Enabled {
 			// Knowledge retrieval PEP: requester-scoped WeKnora search.
 			agentLoop.RegisterTool(tools.NewKnowledgeSearchTool(aepManager, &cfg.Knowledge))
+		}
+		if len(cfg.A2A.Peers) > 0 {
+			// Agent-to-agent delegation, act-as chained to the requester.
+			agentLoop.RegisterTool(tools.NewInvokeAgentTool(aepManager, cfg.A2A.Peers))
 		}
 	}
 	publishGatewayEvent(agentLoop, runtimeevents.KindGatewayStart, startedAt, nil)

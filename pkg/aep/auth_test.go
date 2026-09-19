@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -190,5 +191,43 @@ func TestClaimsAccessorsAndDiscardLogger(t *testing.T) {
 	discardLogger{}.Errorf("x")
 	if randomSuffix() == "" || len(randomSuffix()) != 8 {
 		t.Fatal("randomSuffix must yield 8 hex chars")
+	}
+}
+
+func TestAuthenticatePeerChecksPermissionAndAcceptsAgents(t *testing.T) {
+	f := newAuthFixture(t)
+	f.identity.Store(map[string]any{
+		"user":         map[string]any{"id": "agent-1", "displayName": "Peer Agent", "kind": "agent"},
+		"deploymentId": "demo",
+		"roles":        []string{"runner"},
+		"permissions":  []string{"models.read", "agents.invoke"},
+	})
+	auth := NewAuthenticator(f.server.URL)
+	tok := f.signed("agent-1", "demo", "aep-control", time.Now().Add(time.Hour))
+
+	peer, err := auth.AuthenticatePeer(context.Background(), "demo", tok, "agents.invoke")
+	if err != nil || peer.UserID != "agent-1" || peer.Kind != "agent" {
+		t.Fatalf("AuthenticatePeer = %+v, %v", peer, err)
+	}
+	if len(peer.Permissions) != 2 || peer.Permissions[1] != "agents.invoke" {
+		t.Fatalf("permissions = %v", peer.Permissions)
+	}
+
+	// Missing permission is a typed error carrying the peer identity.
+	f.identity.Store(map[string]any{
+		"user":         map[string]any{"id": "agent-2", "displayName": "Poor Peer", "kind": "agent"},
+		"deploymentId": "demo",
+		"roles":        []string{"runner"},
+		"permissions":  []string{"models.read"},
+	})
+	weak := f.signed("agent-2", "demo", "aep-control", time.Now().Add(time.Hour))
+	peer, err = auth.AuthenticatePeer(context.Background(), "demo", weak, "agents.invoke")
+	if !errors.Is(err, ErrMissingPermission) || peer == nil || peer.UserID != "agent-2" {
+		t.Fatalf("missing permission = %+v, %v", peer, err)
+	}
+
+	// Garbage tokens are rejected outright.
+	if _, err := auth.AuthenticatePeer(context.Background(), "demo", "junk", "agents.invoke"); err == nil {
+		t.Fatal("garbage token must fail")
 	}
 }

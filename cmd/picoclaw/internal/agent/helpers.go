@@ -72,6 +72,9 @@ func agentCmd(message, sessionKey, model string, debug bool) error {
 		if cfg.Knowledge.Enabled {
 			agentLoop.RegisterTool(tools.NewKnowledgeSearchTool(aepManager, &cfg.Knowledge))
 		}
+		if len(cfg.A2A.Peers) > 0 {
+			agentLoop.RegisterTool(tools.NewInvokeAgentTool(aepManager, cfg.A2A.Peers))
+		}
 	}
 
 	// Print agent startup info (only for interactive mode)
