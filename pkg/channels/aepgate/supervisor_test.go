@@ -338,7 +338,7 @@ func TestNewWardenSuccess(t *testing.T) {
 	if _, err := NewWarden(m, &Supervisor{}, "home"); err != nil {
 		t.Fatalf("NewWarden success: %v", err)
 	}
-	if _, err := newWardenWithProvider(m, "home", func(context.Context, *aep.Principal, *aep.RetrievalContext) (string, error) { return "", nil }); err != nil {
+	if _, err := newWardenWithProvider(m, "home", func(context.Context, *aep.Principal, *aep.RetrievalContext) (*fork, error) { return nil, nil }); err != nil {
 		t.Fatalf("provider constructor: %v", err)
 	}
 	if _, err := newWardenWithProvider(m, "home", nil); err == nil {

@@ -565,7 +565,14 @@ func (c *Channel) route(ctx context.Context, principal *aep.Principal) (string, 
 	if c.warden == nil {
 		return "", nil
 	}
-	return c.warden.Route(ctx, principal)
+	target, err := c.warden.Route(ctx, principal)
+	if err != nil {
+		return "", err
+	}
+	if target == nil {
+		return "", nil
+	}
+	return target.URL(), nil
 }
 
 // proxyTo forwards one chat request to an ephemeral fork verbatim: the fork

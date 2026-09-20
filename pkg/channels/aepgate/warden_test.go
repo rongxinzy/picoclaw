@@ -77,9 +77,9 @@ func TestWardenRoutesSubordinatesToForksAndPeersToResident(t *testing.T) {
 	manager := wardenManager(t, server)
 
 	spawned := map[string]bool{}
-	warden, err := newWardenWithProvider(manager, "dept-a", func(ctx context.Context, requester *aep.Principal, requesterCtx *aep.RetrievalContext) (string, error) {
+	warden, err := newWardenWithProvider(manager, "dept-a", func(ctx context.Context, requester *aep.Principal, requesterCtx *aep.RetrievalContext) (*fork, error) {
 		spawned[requester.UserID] = true
-		return "http://127.0.0.1:18901", nil
+		return &fork{port: 18901}, nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -98,11 +98,11 @@ func TestWardenRoutesSubordinatesToForksAndPeersToResident(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s route: %v", tc.userID, err)
 		}
-		if tc.wantFork && target == "" {
+		if tc.wantFork && target == nil {
 			t.Fatalf("%s should be routed to a fork", tc.userID)
 		}
-		if !tc.wantFork && target != "" {
-			t.Fatalf("%s should reach the resident, got %q", tc.userID, target)
+		if !tc.wantFork && target != nil {
+			t.Fatalf("%s should reach the resident, got %+v", tc.userID, target)
 		}
 	}
 	if !spawned["sub-1"] || len(spawned) != 1 {
@@ -118,9 +118,9 @@ func TestWardenFailsClosedOnUnresolvableRequesterScope(t *testing.T) {
 		"ghost":      "", // expected miss: the scope lookup 404s
 	})
 	manager := wardenManager(t, server)
-	warden, err := newWardenWithProvider(manager, "dept-a", func(context.Context, *aep.Principal, *aep.RetrievalContext) (string, error) {
+	warden, err := newWardenWithProvider(manager, "dept-a", func(context.Context, *aep.Principal, *aep.RetrievalContext) (*fork, error) {
 		t.Fatal("fork provider must not be called when scope resolution fails")
-		return "", nil
+		return nil, nil
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -24,7 +24,7 @@ import (
 type Warden struct {
 	manager    *aep.Manager
 	homeTeamID string
-	ensure     func(ctx context.Context, requester *aep.Principal, requesterCtx *aep.RetrievalContext) (string, error)
+	ensure     func(ctx context.Context, requester *aep.Principal, requesterCtx *aep.RetrievalContext) (*fork, error)
 }
 
 // NewWarden binds a warden to the resident session manager and its fork
@@ -41,18 +41,14 @@ func NewWarden(manager *aep.Manager, supervisor *Supervisor, homeTeamID string) 
 	}
 	return &Warden{
 		manager: manager, homeTeamID: homeTeamID,
-		ensure: func(ctx context.Context, requester *aep.Principal, requesterCtx *aep.RetrievalContext) (string, error) {
-			fork, err := supervisor.Ensure(ctx, requester, requesterCtx)
-			if err != nil {
-				return "", err
-			}
-			return fork.URL(), nil
+		ensure: func(ctx context.Context, requester *aep.Principal, requesterCtx *aep.RetrievalContext) (*fork, error) {
+			return supervisor.Ensure(ctx, requester, requesterCtx)
 		},
 	}, nil
 }
 
 // newWardenWithProvider is the test seam: the fork provider is injectable.
-func newWardenWithProvider(manager *aep.Manager, homeTeamID string, ensure func(ctx context.Context, requester *aep.Principal, requesterCtx *aep.RetrievalContext) (string, error)) (*Warden, error) {
+func newWardenWithProvider(manager *aep.Manager, homeTeamID string, ensure func(ctx context.Context, requester *aep.Principal, requesterCtx *aep.RetrievalContext) (*fork, error)) (*Warden, error) {
 	if manager == nil {
 		return nil, errors.New("aepchat warden requires a running AEP session")
 	}
@@ -65,12 +61,12 @@ func newWardenWithProvider(manager *aep.Manager, homeTeamID string, ensure func(
 	return &Warden{manager: manager, homeTeamID: homeTeamID, ensure: ensure}, nil
 }
 
-// Route returns the proxy target for the requester: "" for the resident
-// instance, or the base URL of the requester's ephemeral fork.
-func (w *Warden) Route(ctx context.Context, principal *aep.Principal) (string, error) {
+// Route returns the fork serving the requester: nil for the resident
+// instance, or the requester's live ephemeral fork.
+func (w *Warden) Route(ctx context.Context, principal *aep.Principal) (*fork, error) {
 	requesterCtx, err := w.manager.DataScopeContext(ctx, principal.UserID)
 	if err != nil {
-		return "", fmt.Errorf("requester scope resolution failed: %w", err)
+		return nil, fmt.Errorf("requester scope resolution failed: %w", err)
 	}
 	ownsHome := false
 	inside := false
@@ -86,7 +82,7 @@ func (w *Warden) Route(ctx context.Context, principal *aep.Principal) (string, e
 		}
 	}
 	if ownsHome || !inside {
-		return "", nil // peer or above: the resident answers directly
+		return nil, nil // peer or above: the resident answers directly
 	}
 	return w.ensure(ctx, principal, requesterCtx)
 }
