@@ -250,7 +250,6 @@ func TestLaunchChildWritesConfigAndEnv(t *testing.T) {
 	}
 }
 
-
 func TestWardenConstructorValidation(t *testing.T) {
 	if _, err := NewWarden(nil, &Supervisor{}, "home"); err == nil {
 		t.Fatal("nil manager must fail")
@@ -305,8 +304,6 @@ func TestReaperSweepsExpiredForks(t *testing.T) {
 	t.Fatal("reaper did not sweep the expired fork in time")
 }
 
-
-
 func TestResidentModelsUsesDefaultManager(t *testing.T) {
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -348,4 +345,3 @@ func TestNewWardenSuccess(t *testing.T) {
 		t.Fatal("nil provider must fail")
 	}
 }
-

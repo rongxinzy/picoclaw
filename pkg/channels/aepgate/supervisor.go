@@ -42,6 +42,7 @@ type fork struct {
 	sessionID   string
 	homeDir     string
 	port        int
+	relaySecret string
 	cancel      context.CancelFunc
 	lastUsed    time.Time
 	expiresAt   time.Time
@@ -49,6 +50,12 @@ type fork struct {
 
 // URL is the fork's aepchat base URL.
 func (f *fork) URL() string { return fmt.Sprintf("http://127.0.0.1:%d", f.port) }
+
+// Relay returns the fork's relay endpoint credentials: the base URL and the
+// one-time secret authenticating turn-relay calls from the resident gateway.
+func (f *fork) Relay() (baseURL, secret string) {
+	return f.URL(), f.relaySecret
+}
 
 // Supervisor spawns, reuses, and reaps ephemeral forks on behalf of the
 // warden. Lifecycle authority lives in a dedicated supervisor account
@@ -154,6 +161,7 @@ func (s *Supervisor) spawn(ctx context.Context, requester *aep.Principal, reques
 	suffix := randomSuffix()
 	username := fmt.Sprintf("eph-%s-%s", sanitize(requester.UserID), suffix)
 	password := "eph-" + randomSuffix() + "-" + randomSuffix()
+	relaySecret := randomToken(32)
 	ttl := defaultForkTTL
 	if s.settings.TTLMinutes > 0 {
 		ttl = time.Duration(s.settings.TTLMinutes) * time.Minute
@@ -192,7 +200,7 @@ func (s *Supervisor) spawn(ctx context.Context, requester *aep.Principal, reques
 	fork := &fork{
 		requesterID: requester.UserID, agentID: record.ID, username: username,
 		password: password, sessionID: "fork-" + suffix, homeDir: homeDir,
-		port: port, cancel: cancel, lastUsed: time.Now(), expiresAt: expiresAt,
+		port: port, relaySecret: relaySecret, cancel: cancel, lastUsed: time.Now(), expiresAt: expiresAt,
 	}
 	if err := s.launchChild(childCtx, fork); err != nil {
 		cancel()
@@ -253,6 +261,7 @@ func (s *Supervisor) launchChild(ctx context.Context, fork *fork) error {
 	cmd.Env = append(os.Environ(),
 		"PICOCLAW_HOME="+fork.homeDir,
 		"PICOCLAW_AEP_PASSWORD="+fork.password,
+		"PICOCLAW_AEPCHAT_RELAY_TOKEN="+fork.relaySecret,
 		"PICOCLAW_KNOWLEDGE_API_KEY="+s.knowledge.APIKey.String(),
 	)
 	cmd.Stdout = nil
@@ -339,9 +348,17 @@ func (s *Supervisor) cleanupAccount(ctx context.Context, fork *fork) {
 }
 
 func randomSuffix() string {
-	buf := make([]byte, 5)
+	return randomToken(5)
+}
+
+// randomToken returns n random bytes as hex (2n characters); a fixed
+// fallback keeps startup deterministic only under a broken crypto source.
+func randomToken(n int) string {
+	buf := make([]byte, n)
 	if _, err := rand.Read(buf); err != nil {
-		return "00000"
+		for i := range buf {
+			buf[i] = 0
+		}
 	}
 	return hex.EncodeToString(buf)
 }
