@@ -22,8 +22,10 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
+	"github.com/sipeed/picoclaw/pkg/aep"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
+	"github.com/sipeed/picoclaw/pkg/channels/aepgate"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/identity"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -43,6 +45,7 @@ type FeishuChannel struct {
 	client     *lark.Client
 	wsClient   *larkws.Client
 	tokenCache *tokenCache // custom cache that supports invalidation
+	bridge     *aepgate.Bridge
 
 	botOpenID    atomic.Value // stores string; populated lazily for @mention detection
 	messageCache sync.Map     // caches fetched messages (messageID -> *larkim.Message)
@@ -61,7 +64,7 @@ type cachedMessage struct {
 	expiry time.Time
 }
 
-func NewFeishuChannel(bc *config.Channel, cfg *config.FeishuSettings, bus *bus.MessageBus) (*FeishuChannel, error) {
+func NewFeishuChannel(bc *config.Channel, cfg *config.FeishuSettings, appCfg *config.Config, bus *bus.MessageBus) (*FeishuChannel, error) {
 	base := channels.NewBaseChannel("feishu", cfg, bus, bc.AllowFrom,
 		channels.WithGroupTrigger(bc.GroupTrigger),
 		channels.WithReasoningChannelID(bc.ReasoningChannelID),
@@ -69,7 +72,14 @@ func NewFeishuChannel(bc *config.Channel, cfg *config.FeishuSettings, bus *bus.M
 
 	tc := newTokenCache()
 	opts := []lark.ClientOptionFunc{lark.WithTokenCache(tc)}
+	domain := lark.FeishuBaseUrl
 	if cfg.IsLark {
+		domain = lark.LarkBaseUrl
+	}
+	if cfg.Domain != "" {
+		domain = strings.TrimRight(cfg.Domain, "/")
+		opts = append(opts, lark.WithOpenBaseUrl(domain))
+	} else if cfg.IsLark {
 		opts = append(opts, lark.WithOpenBaseUrl(lark.LarkBaseUrl))
 	}
 	ch := &FeishuChannel{
@@ -79,12 +89,30 @@ func NewFeishuChannel(bc *config.Channel, cfg *config.FeishuSettings, bus *bus.M
 		tokenCache:  tc,
 		client:      lark.NewClient(cfg.AppID, cfg.AppSecret.String(), opts...),
 	}
+	if cfg.AEP != nil && appCfg != nil && appCfg.AEP.Enabled {
+		bridge, err := aepgate.NewBridge(aep.DefaultManager(), appCfg, cfg.AEP)
+		if err != nil {
+			return nil, err
+		}
+		ch.bridge = bridge
+	}
 	ch.deleteMessageFn = ch.deleteMessageAPI
 	ch.sendMediaPartFn = ch.sendMediaPart
 	ch.sendTextFn = ch.sendText
 	ch.progress = channels.NewToolFeedbackAnimator(ch.EditMessage)
 	ch.SetOwner(ch)
 	return ch, nil
+}
+
+// platformDomain is the websocket/bootstrap domain honoring the override.
+func (c *FeishuChannel) platformDomain() string {
+	if c.config.Domain != "" {
+		return strings.TrimRight(c.config.Domain, "/")
+	}
+	if c.config.IsLark {
+		return lark.LarkBaseUrl
+	}
+	return lark.FeishuBaseUrl
 }
 
 func (c *FeishuChannel) Start(ctx context.Context) error {
@@ -106,15 +134,11 @@ func (c *FeishuChannel) Start(ctx context.Context) error {
 
 	c.mu.Lock()
 	c.cancel = cancel
-	domain := lark.FeishuBaseUrl
-	if c.config.IsLark {
-		domain = lark.LarkBaseUrl
-	}
 	c.wsClient = larkws.NewClient(
 		c.config.AppID,
 		c.config.AppSecret.String(),
 		larkws.WithEventHandler(dispatcher),
-		larkws.WithDomain(domain),
+		larkws.WithDomain(c.platformDomain()),
 	)
 	wsClient := c.wsClient
 	c.mu.Unlock()
@@ -143,6 +167,9 @@ func (c *FeishuChannel) Stop(ctx context.Context) error {
 	c.mu.Unlock()
 	if c.progress != nil {
 		c.progress.StopAll()
+	}
+	if c.bridge != nil {
+		c.bridge.Release()
 	}
 
 	c.SetRunning(false)
@@ -697,6 +724,34 @@ func (c *FeishuChannel) handleMessageReceive(ctx context.Context, event *larkim.
 	if sender != nil && sender.TenantKey != nil && *sender.TenantKey != "" {
 		inboundCtx.SpaceType = "tenant"
 		inboundCtx.SpaceID = *sender.TenantKey
+	}
+
+	// AEP digital-employee integration: resolve the sender's enterprise
+	// identity and route resident/fork. Resident turns continue with the
+	// requester identity (tools scope by the human, not the bot account);
+	// fork turns and rejections were fully handled by the bridge.
+	if c.bridge != nil {
+		verdict := c.bridge.Intercept(ctx, aepgate.InterceptRequest{
+			Platform:         "feishu",
+			PlatformSenderID: senderID,
+			ChatID:           chatID,
+			ChatType:         inboundChatType,
+			Text:             content,
+			HasMedia:         len(mediaRefs) > 0,
+		}, func(text string) error {
+			_, err := c.sendTextFn(ctx, chatID, text)
+			return err
+		})
+		if verdict.Action == aepgate.ActionStop {
+			return nil
+		}
+		inboundCtx.SenderID = verdict.AEPUserID
+		if inboundCtx.Raw == nil {
+			inboundCtx.Raw = map[string]string{}
+		}
+		inboundCtx.Raw["aep_user_id"] = verdict.AEPUserID
+		inboundCtx.Raw["platform_sender_id"] = senderID
+		senderInfo.DisplayName = verdict.DisplayName
 	}
 
 	c.HandleInboundContext(ctx, chatID, content, mediaRefs, inboundCtx, senderInfo)

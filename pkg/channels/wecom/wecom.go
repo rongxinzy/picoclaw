@@ -13,8 +13,10 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/sipeed/picoclaw/pkg/aep"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
+	"github.com/sipeed/picoclaw/pkg/channels/aepgate"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/identity"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -52,6 +54,7 @@ type WeComChannel struct {
 	routes      *reqIDStore
 	mediaClient *http.Client
 	commandSend func(wecomCommand, time.Duration) (wecomEnvelope, error)
+	bridge      *aepgate.Bridge
 }
 
 type wecomTurn struct {
@@ -108,7 +111,7 @@ func (s *recentMessageSet) Mark(id string) bool {
 	return true
 }
 
-func NewChannel(bc *config.Channel, cfg *config.WeComSettings, messageBus *bus.MessageBus) (*WeComChannel, error) {
+func NewChannel(bc *config.Channel, cfg *config.WeComSettings, appCfg *config.Config, messageBus *bus.MessageBus) (*WeComChannel, error) {
 	if cfg.BotID == "" || cfg.Secret.String() == "" {
 		return nil, fmt.Errorf("wecom bot_id and secret are required")
 	}
@@ -132,6 +135,13 @@ func NewChannel(bc *config.Channel, cfg *config.WeComSettings, messageBus *bus.M
 		recent:      newRecentMessageSet(wecomRecentMessageMax),
 		routes:      newReqIDStore(""),
 		mediaClient: &http.Client{Timeout: wecomMediaTimeout},
+	}
+	if cfg.AEP != nil && appCfg != nil && appCfg.AEP.Enabled {
+		bridge, err := aepgate.NewBridge(aep.DefaultManager(), appCfg, cfg.AEP)
+		if err != nil {
+			return nil, err
+		}
+		ch.bridge = bridge
 	}
 	ch.SetOwner(ch)
 	return ch, nil
@@ -159,6 +169,9 @@ func (c *WeComChannel) Stop(_ context.Context) error {
 	}
 	c.connMu.Unlock()
 	c.clearTurns()
+	if c.bridge != nil {
+		c.bridge.Release()
+	}
 	c.SetRunning(false)
 	return nil
 }
@@ -596,6 +609,30 @@ func (c *WeComChannel) dispatchIncoming(reqID string, msg wecomIncomingMessage) 
 			"req_id": reqID,
 		},
 		Raw: metadata,
+	}
+
+	// AEP digital-employee integration: resolve the sender's enterprise
+	// identity and route resident/fork. Rejections, apologies, and fork
+	// replies consume the queued turn through the stream-reply path.
+	if c.bridge != nil {
+		verdict := c.bridge.Intercept(c.ctx, aepgate.InterceptRequest{
+			Platform:         "wecom",
+			PlatformSenderID: senderID,
+			ChatID:           actualChatID,
+			ChatType:         peerKind,
+			Text:             content,
+			HasMedia:         len(mediaRefs) > 0,
+		}, func(text string) error {
+			_, err := c.Send(c.ctx, bus.OutboundMessage{ChatID: actualChatID, Content: text, Context: inboundCtx})
+			return err
+		})
+		if verdict.Action == aepgate.ActionStop {
+			return nil
+		}
+		inboundCtx.SenderID = verdict.AEPUserID
+		inboundCtx.Raw["aep_user_id"] = verdict.AEPUserID
+		inboundCtx.Raw["platform_sender_id"] = senderID
+		sender.DisplayName = verdict.DisplayName
 	}
 
 	c.HandleInboundContext(c.ctx, actualChatID, content, mediaRefs, inboundCtx, sender)

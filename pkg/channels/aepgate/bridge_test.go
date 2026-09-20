@@ -58,9 +58,9 @@ type bridgeFixture struct {
 type forkMode int
 
 const (
-	noFork forkMode = iota // warden answers with nil (resident)
-	liveFork              // fake fork points at this fixture's relay endpoint
-	deadFork              // fake fork points at an unreachable port
+	noFork   forkMode = iota // warden answers with nil (resident)
+	liveFork                 // fake fork points at this fixture's relay endpoint
+	deadFork                 // fake fork points at an unreachable port
 )
 
 // newBridgeFixture wires a subordinate-serving warden; the fake fork honors

@@ -560,6 +560,14 @@ type FeishuSettings struct {
 	VerificationToken   SecureString        `json:"verification_token,omitzero" yaml:"verification_token,omitempty" env:"PICOCLAW_CHANNELS_FEISHU_VERIFICATION_TOKEN"`
 	RandomReactionEmoji FlexibleStringSlice `json:"random_reaction_emoji"       yaml:"-"                            env:"PICOCLAW_CHANNELS_FEISHU_RANDOM_REACTION_EMOJI"`
 	IsLark              bool                `json:"is_lark"                     yaml:"-"                            env:"PICOCLAW_CHANNELS_FEISHU_IS_LARK"`
+	// Domain overrides the Feishu/Lark open-platform base URL (API and the
+	// websocket bootstrap). Empty keeps the official endpoints; test doubles
+	// and self-hosted gateways point it elsewhere.
+	Domain string `json:"domain,omitempty" yaml:"-" env:"PICOCLAW_CHANNELS_FEISHU_DOMAIN"`
+	// AEP binds the channel to the digital-employee model: platform senders
+	// resolve through an AEP identity source and subordinates route to
+	// ephemeral forks. Nil keeps personal-assistant behavior.
+	AEP *AEPChannelSettings `json:"aep,omitempty" yaml:"-"`
 }
 
 type DiscordSettings struct {
@@ -627,6 +635,10 @@ type WeComSettings struct {
 	WebSocketURL        string          `json:"websocket_url,omitempty" yaml:"-"                env:"WEBSOCKET_URL"`
 	SendThinkingMessage bool            `json:"send_thinking_message"   yaml:"-"                env:"SEND_THINKING_MESSAGE"`
 	Streaming           StreamingConfig `json:"streaming,omitzero"      yaml:"-"`
+	// AEP binds the channel to the digital-employee model: platform senders
+	// resolve through an AEP identity source and subordinates route to
+	// ephemeral forks. Nil keeps personal-assistant behavior.
+	AEP *AEPChannelSettings `json:"aep,omitempty" yaml:"-"`
 }
 
 func (c *WeComSettings) SetSecret(secret string) {
