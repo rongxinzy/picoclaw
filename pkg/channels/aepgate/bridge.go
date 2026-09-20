@@ -83,6 +83,9 @@ func NewBridge(manager *aep.Manager, cfg *config.Config, settings *config.AEPCha
 	if err != nil {
 		return nil, err
 	}
+	if settings.IdentityCacheSeconds > 0 {
+		resolver.SetCacheTTLs(time.Duration(settings.IdentityCacheSeconds)*time.Second, 0)
+	}
 	gate, err := AcquireGate(cfg, settings.Warden)
 	if err != nil {
 		return nil, err

@@ -63,6 +63,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/", s.handleWS) // the channel dials the configured URL verbatim
 	mux.HandleFunc("/_test/push", s.handlePush)
 	mux.HandleFunc("/_test/sent", s.handleSent)
 	mux.HandleFunc("/_test/reset", s.handleReset)

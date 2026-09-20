@@ -66,8 +66,7 @@ type Channel struct {
 
 	deploymentID string
 	auth         *aep.Authenticator
-	warden       *aepgate.Warden
-	supervisor   *aepgate.Supervisor
+	gate         *aepgate.Gate
 
 	mu           sync.Mutex
 	history      map[string][]record
@@ -111,18 +110,12 @@ func New(channelName string, bc *config.Channel, settings *config.AEPChatSetting
 		ch.relaySecret = settings.RelaySecret.String()
 	}
 	ch.SetOwner(ch)
-	if settings != nil && settings.Warden != nil {
-		supervisor, err := aepgate.NewSupervisor(cfg, settings.Warden)
+	if settings != nil {
+		gate, err := aepgate.AcquireGate(cfg, settings.Warden)
 		if err != nil {
 			return nil, err
 		}
-		warden, err := aepgate.NewWarden(aep.DefaultManager(), supervisor, cfg.AEP.HomeTeamID)
-		if err != nil {
-			supervisor.Stop()
-			return nil, err
-		}
-		ch.supervisor = supervisor
-		ch.warden = warden
+		ch.gate = gate
 	}
 	return ch, nil
 }
@@ -141,9 +134,7 @@ func (c *Channel) Start(ctx context.Context) error {
 
 func (c *Channel) Stop(ctx context.Context) error {
 	c.running.Store(false)
-	if c.supervisor != nil {
-		c.supervisor.Stop()
-	}
+	c.gate.Release()
 	return nil
 }
 
@@ -562,10 +553,10 @@ func (c *Channel) append(chatID string, rec record) record {
 
 // route applies the resident/ephemeral split when the warden is enabled.
 func (c *Channel) route(ctx context.Context, principal *aep.Principal) (string, error) {
-	if c.warden == nil {
+	if c.gate == nil {
 		return "", nil
 	}
-	target, err := c.warden.Route(ctx, principal)
+	target, err := c.gate.Route(ctx, principal)
 	if err != nil {
 		return "", err
 	}

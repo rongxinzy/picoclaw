@@ -30,6 +30,9 @@ type IdentityResolver struct {
 	manager  *aep.Manager
 	sourceID string
 
+	positiveTTL time.Duration
+	negativeTTL time.Duration
+
 	mu       sync.Mutex
 	entries  map[string]string // external ID → local user ID (active only)
 	loadedAt time.Time
@@ -44,7 +47,23 @@ func NewIdentityResolver(manager *aep.Manager, sourceID string) (*IdentityResolv
 	if sourceID == "" {
 		return nil, errors.New("identity resolver requires aep.identity_source_id")
 	}
-	return &IdentityResolver{manager: manager, sourceID: sourceID}, nil
+	return &IdentityResolver{
+		manager: manager, sourceID: sourceID,
+		positiveTTL: identityCacheTTL, negativeTTL: identityNegativeTTL,
+	}, nil
+}
+
+// SetCacheTTLs overrides the positive and negative cache windows; the
+// negative window is clamped to at most half the positive one.
+func (r *IdentityResolver) SetCacheTTLs(positive, negative time.Duration) {
+	if positive <= 0 {
+		positive = identityCacheTTL
+	}
+	if negative <= 0 || negative > positive/2 {
+		negative = positive / 2
+	}
+	r.positiveTTL = positive
+	r.negativeTTL = negative
 }
 
 // Resolve returns the AEP user ID for an external sender ID, or "" when the
@@ -56,12 +75,12 @@ func (r *IdentityResolver) Resolve(ctx context.Context, externalID string) (stri
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if id, ok := r.entries[externalID]; ok && time.Since(r.loadedAt) < identityCacheTTL {
+	if id, ok := r.entries[externalID]; ok && time.Since(r.loadedAt) < r.positiveTTL {
 		return id, nil
 	}
 	// Serve fresh negatives without reloading: a burst of unmapped senders
 	// triggers at most one reload per negative TTL window.
-	if r.entries != nil && time.Since(r.loadedAt) < identityNegativeTTL {
+	if r.entries != nil && time.Since(r.loadedAt) < r.negativeTTL {
 		return "", nil
 	}
 	entries, err := r.load(ctx)
