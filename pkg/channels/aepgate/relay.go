@@ -22,6 +22,9 @@ type RelayTurn struct {
 	RequesterDisplayName string `json:"requesterDisplayName"`
 	Text                 string `json:"text"`
 	SourceChannel        string `json:"sourceChannel"`
+	// TurnID is the caller-chosen idempotency key: the fork replays the
+	// remembered outcome for a repeated key instead of re-executing.
+	TurnID string `json:"turnId,omitempty"`
 }
 
 // RelayClient posts turns to fork relay endpoints. Safe for concurrent use.

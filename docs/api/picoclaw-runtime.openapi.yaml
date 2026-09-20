@@ -23,9 +23,15 @@ info:
     | Surface | Credential |
     |---|---|
     | aepchat messages | AEP access token of a human account (`kind=human`) |
-    | aepchat relay turns | one-time relay secret injected by the fork supervisor |
+    | aepchat relay turns | per-fork relay secret injected by the fork supervisor |
     | a2a JSON-RPC | AEP access token of a peer agent holding `agents.invoke` |
-    | health, agent card | none |
+    | `/reload` | per-run gateway token (written to the pid file at startup) |
+    | health, readiness, agent card | none |
+
+    Error envelope: runtime endpoints answer errors as `{code, detail}`
+    (ChannelError), not the RFC 9457 `application/problem+json` used by the
+    AEP control plane. The two surfaces serve different consumers and trust
+    domains; the divergence is deliberate.
   license:
     name: MIT
     url: https://opensource.org/licenses/MIT
@@ -49,15 +55,74 @@ paths:
       security: []
       description: Gateway process liveness. Always served, channel-independent.
       responses:
-        '200': {description: Process is up}
+        '200':
+          description: Process is up.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HealthStatus'}
   /ready:
     get:
       tags: [Health]
       operationId: getProcessReady
       security: []
-      description: Gateway readiness (channels and providers initialized).
+      description: >-
+        Gateway readiness (channels and providers initialized). 503 while
+        starting or when any registered check reports fail.
       responses:
-        '200': {description: Ready}
+        '200':
+          description: Ready.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HealthStatus'}
+        '503':
+          description: Not ready, or a registered check failed.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HealthStatus'}
+  /reload:
+    post:
+      tags: [Health]
+      operationId: postReload
+      summary: Trigger a configuration hot reload
+      description: |-
+        Signals the gateway to reload its configuration (the same path as
+        file-watch hot reload; applied asynchronously). In gateway mode the
+        bearer token is the per-run token written to the pid file at
+        startup, so the endpoint is always authenticated there; embedders
+        constructing the health server without a token must not expose it
+        on an untrusted interface. This endpoint uses a simple
+        `{status}` / `{error}` envelope, not ChannelError.
+      security: [{reloadBearerAuth: []}]
+      responses:
+        '200':
+          description: Reload queued.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, example: 'reload triggered'}
+        '401':
+          description: Missing or wrong bearer token.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SimpleError'}
+        '405':
+          description: Method is not POST.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SimpleError'}
+        '500':
+          description: The reload callback returned an error.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SimpleError'}
+        '503':
+          description: No reload function configured.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SimpleError'}
   /aepchat/v1/health:
     get:
       tags: [aepchat]
@@ -87,7 +152,7 @@ paths:
         requester's teams lie strictly inside the resident's home-team
         subtree, the request is proxied verbatim to the requester's
         ephemeral fork and the fork's response is returned.
-      security: [{aepBearerAuth: []}]
+      security: [{humanBearerAuth: []}]
       requestBody:
         required: true
         content:
@@ -147,11 +212,14 @@ paths:
       operationId: listChatMessages
       summary: Poll chat messages after a sequence cursor
       description: >-
-        Returns records with `seq` greater than `after`. Only chat
-        participants may poll: the requester must appear as the sender of an
-        earlier user record (an empty chat is readable by the first writer).
-        Warden-proxied requests follow the same rule on the fork.
-      security: [{aepBearerAuth: []}]
+        Returns records with `seq` greater than `after`. The page is bounded
+        by the instance's in-memory history ring (default 500 records,
+        configurable via the channel's history_limit) — there is no limit
+        parameter. Only chat participants may poll: the requester must
+        appear as the sender of an earlier user record (an empty chat is
+        readable by the first writer). Warden-proxied requests follow the
+        same rule on the fork.
+      security: [{humanBearerAuth: []}]
       parameters:
         - name: after
           in: query
@@ -195,6 +263,18 @@ paths:
         resident's identity-mapping bridge, so the fork's tools scope by the
         original requester.
 
+        HTTP 202 is deliberate family consistency with the aepchat message
+        endpoint, but the call is synchronous: the response body carries the
+        turn's final reply, bounded by the 120s turn budget. The fork's
+        listener binds a loopback interface; the relay secret must never
+        cross a network.
+
+        Idempotency: the optional `turnId` makes supervisor retries safe.
+        The fork remembers the outcome of its most recent relayed turns
+        (bounded, FIFO eviction) and replays the stored response for a
+        repeated `turnId` without re-executing the turn. Turns that timed
+        out are not remembered — a retry re-executes.
+
         Replies hand off through a FIFO waiter queue per chat: concurrent
         relay turns for one chat each receive exactly their own turn's
         final reply (per-session turn serialization keeps finals in arrival
@@ -213,6 +293,7 @@ paths:
               requesterDisplayName: 'Wen Xiaoxia'
               text: '帮我出部门报告'
               sourceChannel: feishu
+              turnId: turn-9f2a1c
       responses:
         '202':
           description: Turn finished; the reply is the turn's final output.
@@ -296,7 +377,7 @@ paths:
         authentication failed; -32002 missing agents.invoke permission;
         -32003 act-as missing or endpoint not running; -32004 chain depth
         exceeded; -32005 task not found.
-      security: [{aepBearerAuth: []}]
+      security: [{agentBearerAuth: []}]
       requestBody:
         required: true
         content:
@@ -354,15 +435,38 @@ paths:
                     error: {code: -32004, message: 'delegation chain exceeds the maximum depth of 3'}
 components:
   securitySchemes:
-    aepBearerAuth:
+    humanBearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: AEP access token issued by the control service (Ed25519 JWT, audience aep-control).
+      description: >-
+        AEP access token of a human account (kind=human, Ed25519 JWT,
+        audience aep-control). Digital-employee tokens are rejected on this
+        surface — the structural bot-loop prevention.
+    agentBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        AEP access token of a peer digital employee holding the
+        agents.invoke permission.
     relayBearerAuth:
       type: http
       scheme: bearer
-      description: One-time relay secret generated by the fork supervisor at spawn; valid only on ephemeral forks.
+      description: >-
+        Per-fork relay secret: generated by the fork supervisor at spawn
+        (256-bit), injected via PICOCLAW_AEPCHAT_RELAY_TOKEN, reused for
+        every relayed turn over the fork's lifetime, and never configured
+        on resident instances. The security model assumes fork listeners
+        bind loopback interfaces only — the secret is a plaintext bearer
+        credential on the wire.
+    reloadBearerAuth:
+      type: http
+      scheme: bearer
+      description: >-
+        Per-run gateway token generated at startup and written to the pid
+        file in the picoclaw home directory (same trust domain as the
+        config directory). Gateway mode always sets it.
   responses:
     ChannelError:
       description: Error with a stable channel error code.
@@ -370,6 +474,28 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/ChannelError'}
   schemas:
+    HealthStatus:
+      type: object
+      required: [status, uptime]
+      properties:
+        status: {type: string, description: 'ok (health), ready / not ready (readiness).'}
+        uptime: {type: string, description: Process uptime as a duration string.}
+        pid: {type: integer}
+        checks:
+          type: object
+          description: Registered readiness checks (readiness endpoint).
+          additionalProperties:
+            type: object
+            properties:
+              name: {type: string}
+              status: {type: string, enum: [ok, fail]}
+              message: {type: string}
+              timestamp: {type: string, format: date-time}
+    SimpleError:
+      type: object
+      required: [error]
+      properties:
+        error: {type: string}
     ChannelError:
       type: object
       required: [code, detail]
@@ -411,8 +537,15 @@ components:
       properties:
         seq: {type: integer, format: int64}
         from: {type: string, enum: [user, agent]}
-        senderId: {type: string, description: AEP user id of the writer (user records).}
-        senderName: {type: string}
+        senderId: {type: string, description: AEP user id of the writer; present on user records only.}
+        senderName:
+          type: string
+          description: >-
+            Display name of the writer; present on user records only. Agent
+            records are unnamed by design — replies are attributed by the
+            serving instance: each instance's endpoint returns only its own
+            replies, and group fan-out is one POST per participating
+            instance.
         text: {type: string}
         at: {type: string, format: date-time}
     MessagePage:
@@ -436,6 +569,13 @@ components:
         requesterDisplayName: {type: string}
         text: {type: string, minLength: 1, description: Message text (at most 16384 runes).}
         sourceChannel: {type: string, description: "Originating platform (feishu, wecom)."}
+        turnId:
+          type: string
+          maxLength: 128
+          description: >-
+            Optional idempotency key chosen by the caller (the resident
+            bridge generates one per routed message). A repeated turnId
+            replays the remembered outcome without re-executing the turn.
     RelayTurnResponse:
       type: object
       required: [reply, seq]

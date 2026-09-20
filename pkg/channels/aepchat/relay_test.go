@@ -267,6 +267,59 @@ func TestRelayTurnEdgeRejections(t *testing.T) {
 	}
 }
 
+func TestRelayTurnIdempotency(t *testing.T) {
+	ch, b, ts := newRelayChannel(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		msg := <-b.InboundChan()
+		if _, err := ch.Send(context.Background(), finalOutbound(msg.Context.ChatID, "answer:"+msg.Content)); err != nil {
+			t.Errorf("Send: %v", err)
+		}
+	}()
+
+	body := `{"chatID":"feishu:oc_4","requesterUserID":"user-sub","text":"once","turnId":"turn-1"}`
+	status, first := relayPost(t, ts.URL, "relay-secret-1", body)
+	if status != http.StatusAccepted || first["reply"] != "answer:once" {
+		t.Fatalf("first = %d %v", status, first)
+	}
+	<-done
+
+	// A retry with the same turnId replays the remembered outcome: same
+	// reply and seq, and no second inbound is ever published.
+	status, replay := relayPost(t, ts.URL, "relay-secret-1", body)
+	if status != http.StatusAccepted || replay["reply"] != first["reply"] || replay["seq"] != first["seq"] {
+		t.Fatalf("replay = %d %v (first was %v)", status, replay, first)
+	}
+	select {
+	case <-b.InboundChan():
+		t.Fatal("turn re-executed on idempotent replay")
+	default:
+	}
+
+	// A different turnId is a new turn and executes normally.
+	go func() {
+		msg := <-b.InboundChan()
+		if _, err := ch.Send(context.Background(), finalOutbound(msg.Context.ChatID, "answer:again")); err != nil {
+			t.Errorf("Send: %v", err)
+		}
+	}()
+	status, fresh := relayPost(t, ts.URL, "relay-secret-1",
+		`{"chatID":"feishu:oc_4","requesterUserID":"user-sub","text":"again","turnId":"turn-2"}`)
+	if status != http.StatusAccepted || fresh["reply"] != "answer:again" {
+		t.Fatalf("fresh = %d %v", status, fresh)
+	}
+
+	// Oversized turnId is rejected before any state changes.
+	big := strings.Repeat("t", 200)
+	status, body2 := relayPost(t, ts.URL, "relay-secret-1",
+		`{"chatID":"c","requesterUserID":"u","text":"hi","turnId":"`+big+`"}`)
+	if status != http.StatusBadRequest || body2["code"] != "INVALID_REQUEST" {
+		t.Fatalf("oversized turnId = %d %v", status, body2)
+	}
+}
+
 func TestRelayTurnNotRunning(t *testing.T) {
 	ch, _, ts := newRelayChannel(t)
 	_ = ch.Stop(context.Background())

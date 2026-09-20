@@ -43,6 +43,11 @@ const (
 	relayTurnTimeout = 120 * time.Second
 	// relayMaxWaiters caps queued relay turns per chat.
 	relayMaxWaiters = 16
+	// relayResultCache bounds how many finished relay turns (by turnId)
+	// stay replayable for idempotent supervisor retries.
+	relayResultCache = 64
+	// relayTurnIDMax bounds a caller-supplied idempotency key.
+	relayTurnIDMax = 128
 	// metadataKeyOutboundKind mirrors the agent package's final marker.
 	metadataKeyOutboundKind = "outbound_kind"
 	outboundKindFinal       = "final"
@@ -56,6 +61,13 @@ type record struct {
 	SenderName string `json:"senderName,omitempty"`
 	Text       string `json:"text"`
 	At         string `json:"at"`
+}
+
+// relayTurnResult is the remembered outcome of one finished relay turn,
+// replayed verbatim for a repeated idempotency key.
+type relayTurnResult struct {
+	reply string
+	seq   int64
 }
 
 // Channel implements an AEP-authenticated HTTP chat channel with polling
@@ -78,6 +90,11 @@ type Channel struct {
 	relayMu      sync.Mutex
 	relayWaiters map[string][]chan string // chat ID → FIFO of pending relay turns
 	relaySkips   map[string]int           // finals owed by abandoned turns
+	// relayResults remembers finished turns by idempotency key (FIFO
+	// eviction past relayResultCache) so a supervisor retry replays the
+	// outcome instead of re-executing the turn.
+	relayResults     map[string]relayTurnResult
+	relayResultOrder []string
 	// relayTimeout bounds one relayed turn; swappable in tests.
 	relayTimeout time.Duration
 
@@ -103,8 +120,9 @@ func New(channelName string, bc *config.Channel, settings *config.AEPChatSetting
 		history:      make(map[string][]record),
 		lastSeq:      make(map[string]int64),
 		historyLimit: limit,
-		relayWaiters: make(map[string][]chan string),
-		relaySkips:   make(map[string]int),
+		relayWaiters:  make(map[string][]chan string),
+		relaySkips:    make(map[string]int),
+		relayResults:  make(map[string]relayTurnResult),
 	}
 	if settings != nil {
 		ch.relaySecret = settings.RelaySecret.String()
@@ -365,6 +383,7 @@ func (c *Channel) handleRelayTurn(w http.ResponseWriter, r *http.Request) {
 		RequesterDisplayName string `json:"requesterDisplayName"`
 		Text                 string `json:"text"`
 		SourceChannel        string `json:"sourceChannel"`
+		TurnID               string `json:"turnId"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "body must be a JSON relay turn")
@@ -372,9 +391,21 @@ func (c *Channel) handleRelayTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	payload.ChatID = strings.TrimSpace(payload.ChatID)
 	payload.RequesterUserID = strings.TrimSpace(payload.RequesterUserID)
+	payload.TurnID = strings.TrimSpace(payload.TurnID)
 	text := strings.TrimSpace(payload.Text)
 	if payload.ChatID == "" || strings.Contains(payload.ChatID, "/") || payload.RequesterUserID == "" || text == "" {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "chatID, requesterUserID, and text are required")
+		return
+	}
+	if len(payload.TurnID) > relayTurnIDMax {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "turnId exceeds the length limit")
+		return
+	}
+	if cached, ok := c.recallRelayResult(payload.TurnID); ok {
+		// Idempotent retry: replay the remembered outcome, no re-execution.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{"reply": cached.reply, "seq": cached.seq})
 		return
 	}
 	if len([]rune(text)) > maxTextRunes {
@@ -432,6 +463,7 @@ func (c *Channel) handleRelayTurn(w http.ResponseWriter, r *http.Request) {
 	defer timer.Stop()
 	select {
 	case reply := <-waiter:
+		c.rememberRelayResult(payload.TurnID, reply, rec.Seq)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(map[string]any{"reply": reply, "seq": rec.Seq})
@@ -445,6 +477,7 @@ func (c *Channel) handleRelayTurn(w http.ResponseWriter, r *http.Request) {
 	c.abandonRelayWaiter(payload.ChatID, waiter)
 	select {
 	case reply := <-waiter:
+		c.rememberRelayResult(payload.TurnID, reply, rec.Seq)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(map[string]any{"reply": reply, "seq": rec.Seq})
@@ -465,6 +498,40 @@ func (c *Channel) registerRelayWaiter(chatID string) chan string {
 	}
 	c.relayWaiters[chatID] = append(c.relayWaiters[chatID], waiter)
 	return waiter
+}
+
+// recallRelayResult returns the remembered outcome of a prior relay turn,
+// if any. Remembered outcomes let a supervisor retry a turn (network-level
+// replay) without re-executing it.
+func (c *Channel) recallRelayResult(turnID string) (relayTurnResult, bool) {
+	if turnID == "" {
+		return relayTurnResult{}, false
+	}
+	c.relayMu.Lock()
+	defer c.relayMu.Unlock()
+	res, ok := c.relayResults[turnID]
+	return res, ok
+}
+
+// rememberRelayResult stores a finished turn's outcome, evicting the oldest
+// remembered turn beyond the cache bound. Timed-out turns are never
+// remembered: a retry re-executes (at-least-once on the timeout path).
+func (c *Channel) rememberRelayResult(turnID, reply string, seq int64) {
+	if turnID == "" {
+		return
+	}
+	c.relayMu.Lock()
+	defer c.relayMu.Unlock()
+	if _, ok := c.relayResults[turnID]; ok {
+		return
+	}
+	c.relayResults[turnID] = relayTurnResult{reply: reply, seq: seq}
+	c.relayResultOrder = append(c.relayResultOrder, turnID)
+	for len(c.relayResultOrder) > relayResultCache {
+		oldest := c.relayResultOrder[0]
+		c.relayResultOrder = c.relayResultOrder[1:]
+		delete(c.relayResults, oldest)
+	}
 }
 
 // abandonRelayWaiter removes a timed-out waiter; if it was still queued, the

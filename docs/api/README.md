@@ -23,10 +23,11 @@ npx redocly preview-docs picoclaw-runtime.openapi.yaml
 | 分组 | 接口 | 认证 |
 |---|---|---|
 | aepchat | `POST/GET /aepchat/v1/chats/{chatId}/messages`、`GET /aepchat/v1/health` | 人类账号的 AEP access token（kind=agent 拒绝，防 bot 环） |
-| Relay | `POST /aepchat/v1/relay/turns` | fork supervisor 生成的一次性 relay secret（只在临时实例上有效） |
+| Relay | `POST /aepchat/v1/relay/turns` | fork supervisor 在 spawn 时生成的 per-fork relay secret（fork 生命周期内复用，常驻实例上不存在；安全模型假定 fork 只绑回环地址） |
 | A2A | `POST /a2a/`（JSON-RPC 2.0） | 对端数字员工的 AEP token + `agents.invoke` 权限 |
 | Agent Card | `GET /.well-known/agent-card.json`、`GET /a2a/card.json` | 无 |
 | Health | `GET /health`、`GET /ready` | 无 |
+| Ops | `POST /reload`（配置热重载） | 启动时写入 pid 文件的 per-run 网关 token（gateway 模式恒有） |
 
 明确**不在**本契约内：
 
@@ -35,6 +36,15 @@ npx redocly preview-docs picoclaw-runtime.openapi.yaml
   此处不重复。
 - 平台通道（飞书/企微）的入站连接是平台→运行时的 websocket 长连接，
   不是本进程暴露的服务端接口，不在 HTTP API 之列。
+- **pico 通道的 HTTP 面**（如 `/pico/media/{refID}` 媒体下载）与**通用通道
+  webhook 面**（随通道配置动态注册到网关 mux）属上游个人助手形态，AEP
+  数字员工部署不启用，不在本契约的稳定面内。
+- OAuth 登录流程的**临时回调 server**（登录期间在 localhost 起停）是
+  瞬态面，不属于运行时 API。
+
+另注：运行时错误信封是 `{code, detail}`（ChannelError），**有意**不同于
+AEP 控制面的 RFC 9457 `application/problem+json`——两个面服务不同的消费
+者与信任域。`/reload` 更是简化信封 `{status}`/`{error}`。
 
 ## 契约纪律
 

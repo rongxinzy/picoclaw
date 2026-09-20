@@ -167,6 +167,7 @@ func (b *Bridge) Intercept(ctx context.Context, req InterceptRequest, reply func
 		RequesterDisplayName: displayName,
 		Text:                 req.Text,
 		SourceChannel:        req.Platform,
+		TurnID:               randomToken(16),
 	})
 	if err != nil {
 		logger.ErrorCF(req.Platform, "fork relay failed", map[string]any{
