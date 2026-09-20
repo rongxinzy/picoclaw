@@ -237,3 +237,42 @@ func TestRelayTurnBusyCap(t *testing.T) {
 		t.Fatalf("busy = %d %v", status, body)
 	}
 }
+
+func TestRelayTurnEdgeRejections(t *testing.T) {
+	_, _, ts := newRelayChannel(t)
+
+	// Wrong method on the relay route.
+	resp, err := http.Get(ts.URL + "/aepchat/v1/relay/turns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("method = %d", resp.StatusCode)
+	}
+
+	// Oversized text is rejected before any state changes.
+	big := strings.Repeat("x", 20000)
+	status, body := relayPost(t, ts.URL, "relay-secret-1",
+		`{"chatID":"c","requesterUserID":"u","text":"`+big+`"}`)
+	if status != http.StatusRequestEntityTooLarge || body["code"] != "MESSAGE_TOO_LARGE" {
+		t.Fatalf("oversized = %d %v", status, body)
+	}
+
+	// A slashed chat id is invalid.
+	status, body = relayPost(t, ts.URL, "relay-secret-1",
+		`{"chatID":"a/b","requesterUserID":"u","text":"hi"}`)
+	if status != http.StatusBadRequest || body["code"] != "INVALID_REQUEST" {
+		t.Fatalf("slashed = %d %v", status, body)
+	}
+}
+
+func TestRelayTurnNotRunning(t *testing.T) {
+	ch, _, ts := newRelayChannel(t)
+	_ = ch.Stop(context.Background())
+	status, body := relayPost(t, ts.URL, "relay-secret-1",
+		`{"chatID":"c","requesterUserID":"u","text":"hi"}`)
+	if status != http.StatusServiceUnavailable || body["code"] != "CHANNEL_NOT_RUNNING" {
+		t.Fatalf("not running = %d %v", status, body)
+	}
+}
