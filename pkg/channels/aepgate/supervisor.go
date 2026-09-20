@@ -1,4 +1,4 @@
-package aepchat
+package aepgate
 
 import (
 	"context"

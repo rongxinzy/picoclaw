@@ -24,6 +24,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/aep"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
+	"github.com/sipeed/picoclaw/pkg/channels/aepgate"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/identity"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -56,8 +57,8 @@ type Channel struct {
 
 	deploymentID string
 	auth         *aep.Authenticator
-	warden       *Warden
-	supervisor   *Supervisor
+	warden       *aepgate.Warden
+	supervisor   *aepgate.Supervisor
 
 	mu           sync.Mutex
 	history      map[string][]record
@@ -90,11 +91,11 @@ func New(channelName string, bc *config.Channel, settings *config.AEPChatSetting
 	}
 	ch.SetOwner(ch)
 	if settings != nil && settings.Warden != nil {
-		supervisor, err := NewSupervisor(cfg, settings.Warden)
+		supervisor, err := aepgate.NewSupervisor(cfg, settings.Warden)
 		if err != nil {
 			return nil, err
 		}
-		warden, err := NewWarden(aep.DefaultManager(), supervisor, cfg.AEP.HomeTeamID)
+		warden, err := aepgate.NewWarden(aep.DefaultManager(), supervisor, cfg.AEP.HomeTeamID)
 		if err != nil {
 			supervisor.Stop()
 			return nil, err
