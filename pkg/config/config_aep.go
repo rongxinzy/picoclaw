@@ -42,6 +42,30 @@ type AEPChatSettings struct {
 	// inside the home-team subtree (strictly below) are served by scoped
 	// ephemeral forks spawned on demand.
 	Warden *WardenSettings `json:"warden,omitempty" yaml:"-" env:"-"`
+	// RelaySecret authenticates turn-relay calls from the resident gateway
+	// (IM channels routing subordinate messages through this fork). Injected
+	// by the fork supervisor at spawn via PICOCLAW_AEPCHAT_RELAY_TOKEN;
+	// never set on a resident instance.
+	RelaySecret SecureString `json:"relay_secret,omitzero" yaml:"-" env:"PICOCLAW_AEPCHAT_RELAY_TOKEN"`
+}
+
+// AEPChannelSettings binds an IM channel (feishu, wecom, ...) to the AEP
+// digital-employee model: platform senders resolve to AEP users through an
+// identity source, and the warden routes subordinates to ephemeral forks.
+// A nil AEP section keeps the channel's personal-assistant behavior.
+type AEPChannelSettings struct {
+	// IdentitySourceID is the AEP identity source whose user mappings bind
+	// this platform's native sender IDs to platform users. Required.
+	IdentitySourceID string `json:"identity_source_id,omitempty" yaml:"-"`
+	// IdentityCacheSeconds bounds the positive mapping cache (default 60);
+	// unmapped lookups re-query at least every quarter of this. Lower values
+	// trade control-plane load for faster mapping propagation.
+	IdentityCacheSeconds int `json:"identity_cache_seconds,omitempty" yaml:"-"`
+	// Warden enables the resident/ephemeral split for this channel. Optional:
+	// without it every mapped requester talks to the resident instance.
+	Warden *WardenSettings `json:"warden,omitempty" yaml:"-"`
+	// UnmappedReply overrides the rejection text for unmapped senders.
+	UnmappedReply string `json:"unmapped_reply,omitempty" yaml:"-"`
 }
 
 // WardenSettings configures ephemeral fork spawning.

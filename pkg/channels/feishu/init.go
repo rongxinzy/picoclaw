@@ -19,7 +19,7 @@ func init() {
 			if !ok {
 				return nil, channels.ErrSendFailed
 			}
-			return NewFeishuChannel(bc, c, b)
+			return NewFeishuChannel(bc, c, cfg, b)
 		},
 	)
 }

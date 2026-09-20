@@ -19,7 +19,7 @@ func init() {
 			if !ok {
 				return nil, channels.ErrSendFailed
 			}
-			return NewChannel(bc, c, b)
+			return NewChannel(bc, c, cfg, b)
 		},
 	)
 }

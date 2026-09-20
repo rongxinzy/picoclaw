@@ -627,7 +627,7 @@ func newTestWeComChannel(t *testing.T, messageBus *bus.MessageBus) *WeComChannel
 	cfg := &config.WeComSettings{BotID: "bot-1"}
 	cfg.SetSecret("secret-1")
 	bc := &config.Channel{Type: config.ChannelWeCom, Enabled: true}
-	ch, err := NewChannel(bc, cfg, messageBus)
+	ch, err := NewChannel(bc, cfg, config.DefaultConfig(), messageBus)
 	if err != nil {
 		t.Fatalf("NewChannel() error = %v", err)
 	}

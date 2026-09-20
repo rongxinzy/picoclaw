@@ -9,6 +9,7 @@ package aepchat
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/aep"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
+	"github.com/sipeed/picoclaw/pkg/channels/aepgate"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/identity"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -36,6 +38,14 @@ const (
 	maxTextRunes         = 16384
 	maxBodyBytes         = 1 << 20
 	platformSenderPrefix = platformName + ":"
+	// relayTurnTimeout bounds one relayed turn; the resident turns it into an
+	// apology to the requester.
+	relayTurnTimeout = 120 * time.Second
+	// relayMaxWaiters caps queued relay turns per chat.
+	relayMaxWaiters = 16
+	// metadataKeyOutboundKind mirrors the agent package's final marker.
+	metadataKeyOutboundKind = "outbound_kind"
+	outboundKindFinal       = "final"
 )
 
 // record is one chat message, from either the requester or the agent.
@@ -56,14 +66,20 @@ type Channel struct {
 
 	deploymentID string
 	auth         *aep.Authenticator
-	warden       *Warden
-	supervisor   *Supervisor
+	gate         *aepgate.Gate
 
 	mu           sync.Mutex
 	history      map[string][]record
 	lastSeq      map[string]int64
 	historyLimit int
 	messageIDs   atomic.Int64
+
+	relaySecret  string
+	relayMu      sync.Mutex
+	relayWaiters map[string][]chan string // chat ID → FIFO of pending relay turns
+	relaySkips   map[string]int           // finals owed by abandoned turns
+	// relayTimeout bounds one relayed turn; swappable in tests.
+	relayTimeout time.Duration
 
 	ctx     context.Context
 	running atomic.Bool
@@ -87,20 +103,19 @@ func New(channelName string, bc *config.Channel, settings *config.AEPChatSetting
 		history:      make(map[string][]record),
 		lastSeq:      make(map[string]int64),
 		historyLimit: limit,
+		relayWaiters: make(map[string][]chan string),
+		relaySkips:   make(map[string]int),
+	}
+	if settings != nil {
+		ch.relaySecret = settings.RelaySecret.String()
 	}
 	ch.SetOwner(ch)
-	if settings != nil && settings.Warden != nil {
-		supervisor, err := NewSupervisor(cfg, settings.Warden)
+	if settings != nil {
+		gate, err := aepgate.AcquireGate(cfg, settings.Warden)
 		if err != nil {
 			return nil, err
 		}
-		warden, err := NewWarden(aep.DefaultManager(), supervisor, cfg.AEP.HomeTeamID)
-		if err != nil {
-			supervisor.Stop()
-			return nil, err
-		}
-		ch.supervisor = supervisor
-		ch.warden = warden
+		ch.gate = gate
 	}
 	return ch, nil
 }
@@ -119,16 +134,15 @@ func (c *Channel) Start(ctx context.Context) error {
 
 func (c *Channel) Stop(ctx context.Context) error {
 	c.running.Store(false)
-	if c.supervisor != nil {
-		c.supervisor.Stop()
-	}
+	c.gate.Release()
 	return nil
 }
 
 func (c *Channel) IsRunning() bool { return c.running.Load() }
 
 // Send buffers an agent reply for polling. It is called by the channel
-// manager worker; never blocks.
+// manager worker; never blocks. A final reply also wakes the head relay
+// waiter when one is queued for the chat.
 func (c *Channel) Send(_ context.Context, msg bus.OutboundMessage) ([]string, error) {
 	if !c.running.Load() {
 		return nil, channels.ErrNotRunning
@@ -137,6 +151,9 @@ func (c *Channel) Send(_ context.Context, msg bus.OutboundMessage) ([]string, er
 		return nil, nil
 	}
 	rec := c.append(msg.ChatID, record{From: "agent", Text: msg.Content})
+	if msg.Context.Raw[metadataKeyOutboundKind] == outboundKindFinal {
+		c.deliverRelay(msg.ChatID, msg.Content)
+	}
 	return []string{fmt.Sprintf("aepchat-%d", rec.Seq)}, nil
 }
 
@@ -170,6 +187,13 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "use POST or GET")
+		return
+	case path == "v1/relay/turns":
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "use POST")
+			return
+		}
+		c.handleRelayTurn(w, r)
 		return
 	default:
 		writeError(w, http.StatusNotFound, "ROUTE_NOT_FOUND", "unknown aepchat route")
@@ -305,7 +329,183 @@ func (c *Channel) handleGet(w http.ResponseWriter, r *http.Request, chatID strin
 	_ = json.NewEncoder(w).Encode(map[string]any{"messages": out, "nextAfter": next})
 }
 
-// authenticate resolves the AEP bearer principal; a rejected digital
+// handleRelayTurn executes one turn on behalf of a resident gateway that
+// routed a subordinate's IM message to this fork. The relay secret (not a
+// human token) authenticates the caller; the requester identity arrives as
+// data already resolved by the resident's identity-mapping bridge, so the
+// fork's tools scope by the original requester.
+//
+// The reply is the turn's final outbound message. Waiters queue FIFO per
+// chat; per-session turn serialization keeps finals in arrival order, so
+// each waiter receives exactly its own turn's reply.
+func (c *Channel) handleRelayTurn(w http.ResponseWriter, r *http.Request) {
+	if !c.running.Load() {
+		writeError(w, http.StatusServiceUnavailable, "CHANNEL_NOT_RUNNING", "aepchat is not running")
+		return
+	}
+	if c.relaySecret == "" {
+		writeError(w, http.StatusServiceUnavailable, "RELAY_DISABLED", "this instance accepts no relayed turns")
+		return
+	}
+	header := r.Header.Get("Authorization")
+	if !strings.HasPrefix(header, "Bearer ") ||
+		subtle.ConstantTimeCompare([]byte(strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))), []byte(c.relaySecret)) != 1 {
+		writeError(w, http.StatusUnauthorized, "RELAY_UNAUTHORIZED", "relay token mismatch")
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "unreadable body")
+		return
+	}
+	var payload struct {
+		ChatID               string `json:"chatID"`
+		ChatType             string `json:"chatType"`
+		RequesterUserID      string `json:"requesterUserID"`
+		RequesterDisplayName string `json:"requesterDisplayName"`
+		Text                 string `json:"text"`
+		SourceChannel        string `json:"sourceChannel"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "body must be a JSON relay turn")
+		return
+	}
+	payload.ChatID = strings.TrimSpace(payload.ChatID)
+	payload.RequesterUserID = strings.TrimSpace(payload.RequesterUserID)
+	text := strings.TrimSpace(payload.Text)
+	if payload.ChatID == "" || strings.Contains(payload.ChatID, "/") || payload.RequesterUserID == "" || text == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "chatID, requesterUserID, and text are required")
+		return
+	}
+	if len([]rune(text)) > maxTextRunes {
+		writeError(w, http.StatusRequestEntityTooLarge, "MESSAGE_TOO_LARGE", "text exceeds the per-message limit")
+		return
+	}
+	chatType := strings.ToLower(payload.ChatType)
+	if chatType != "group" {
+		chatType = "direct"
+	}
+
+	waiter := c.registerRelayWaiter(payload.ChatID)
+	if waiter == nil {
+		writeError(w, http.StatusServiceUnavailable, "RELAY_BUSY", "too many queued relay turns for this chat")
+		return
+	}
+
+	rec := c.append(payload.ChatID, record{
+		From:       "user",
+		SenderID:   payload.RequesterUserID,
+		SenderName: payload.RequesterDisplayName,
+		Text:       text,
+	})
+	messageID := fmt.Sprintf("aepchat-relay-%d-%d", c.messageIDs.Add(1), rec.Seq)
+	displayName := payload.RequesterDisplayName
+	if displayName == "" {
+		displayName = payload.RequesterUserID
+	}
+	sender := bus.SenderInfo{
+		Platform:    platformName,
+		PlatformID:  payload.RequesterUserID,
+		CanonicalID: identity.BuildCanonicalID(platformName, payload.RequesterUserID),
+		Username:    payload.RequesterUserID,
+		DisplayName: displayName,
+	}
+	inboundCtx := bus.InboundContext{
+		Channel:   c.Name(),
+		ChatID:    payload.ChatID,
+		ChatType:  chatType,
+		SenderID:  payload.RequesterUserID,
+		MessageID: messageID,
+		Raw: map[string]string{
+			"aep_user_id":  payload.RequesterUserID,
+			"relay":        "1",
+			"relay_source": payload.SourceChannel,
+		},
+	}
+	c.HandleInboundContext(r.Context(), payload.ChatID, text, nil, inboundCtx, sender)
+
+	relayTimeout := relayTurnTimeout
+	if c.relayTimeout > 0 {
+		relayTimeout = c.relayTimeout
+	}
+	timer := time.NewTimer(relayTimeout)
+	defer timer.Stop()
+	select {
+	case reply := <-waiter:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{"reply": reply, "seq": rec.Seq})
+		return
+	case <-timer.C:
+	case <-r.Context().Done():
+	}
+	// Abandon: if the waiter is still queued, the turn's eventual final must
+	// be discarded (skip counter); if delivery raced with the timeout, the
+	// non-blocking read below still wins.
+	c.abandonRelayWaiter(payload.ChatID, waiter)
+	select {
+	case reply := <-waiter:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{"reply": reply, "seq": rec.Seq})
+		return
+	default:
+	}
+	writeError(w, http.StatusGatewayTimeout, "RELAY_TURN_TIMEOUT", "the fork did not finish the turn in time")
+}
+
+// registerRelayWaiter appends one FIFO waiter for the chat, rejecting the
+// call (nil) when the queue is saturated.
+func (c *Channel) registerRelayWaiter(chatID string) chan string {
+	waiter := make(chan string, 1)
+	c.relayMu.Lock()
+	defer c.relayMu.Unlock()
+	if len(c.relayWaiters[chatID]) >= relayMaxWaiters {
+		return nil
+	}
+	c.relayWaiters[chatID] = append(c.relayWaiters[chatID], waiter)
+	return waiter
+}
+
+// abandonRelayWaiter removes a timed-out waiter; if it was still queued, the
+// pending final is owed to nobody and the next final must be skipped.
+func (c *Channel) abandonRelayWaiter(chatID string, waiter chan string) {
+	c.relayMu.Lock()
+	defer c.relayMu.Unlock()
+	queue := c.relayWaiters[chatID]
+	for i, queued := range queue {
+		if queued == waiter {
+			c.relayWaiters[chatID] = append(queue[:i], queue[i+1:]...)
+			c.relaySkips[chatID]++
+			return
+		}
+	}
+}
+
+// deliverRelay hands one final reply to the head relay waiter, consuming a
+// skip first when an abandoned turn is still owed a discard.
+func (c *Channel) deliverRelay(chatID, content string) {
+	c.relayMu.Lock()
+	if c.relaySkips[chatID] > 0 {
+		c.relaySkips[chatID]--
+		c.relayMu.Unlock()
+		return
+	}
+	var waiter chan string
+	if queue := c.relayWaiters[chatID]; len(queue) > 0 {
+		waiter = queue[0]
+		c.relayWaiters[chatID] = queue[1:]
+	}
+	c.relayMu.Unlock()
+	if waiter == nil {
+		return
+	}
+	select {
+	case waiter <- content:
+	default: // waiter abandoned between pop and send; the value is its own
+	}
+}
+
 // employee gets 403 with a stable reason.
 func (c *Channel) authenticate(r *http.Request) (*aep.Principal, int, string) {
 	header := r.Header.Get("Authorization")
@@ -353,10 +553,17 @@ func (c *Channel) append(chatID string, rec record) record {
 
 // route applies the resident/ephemeral split when the warden is enabled.
 func (c *Channel) route(ctx context.Context, principal *aep.Principal) (string, error) {
-	if c.warden == nil {
+	if c.gate == nil {
 		return "", nil
 	}
-	return c.warden.Route(ctx, principal)
+	target, err := c.gate.Route(ctx, principal)
+	if err != nil {
+		return "", err
+	}
+	if target == nil {
+		return "", nil
+	}
+	return target.URL(), nil
 }
 
 // proxyTo forwards one chat request to an ephemeral fork verbatim: the fork
