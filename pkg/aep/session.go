@@ -184,6 +184,9 @@ const (
 	tokenKindModel
 )
 
+// identityMappingsPageLimit matches the control plane's maximum page size.
+const identityMappingsPageLimit = 200
+
 func (m *Manager) tokenFor(ctx context.Context, kind tokenKind) (string, error) {
 	if tok := m.cachedToken(kind); tok != "" {
 		return tok, nil
@@ -454,6 +457,20 @@ func (m *Manager) DataScopeContext(ctx context.Context, userID string) (*Retriev
 		return nil, p
 	}
 	return out, nil
+}
+
+// IdentityMappings pages through one identity source's user mappings with
+// the session's own grants; the role needs identity.read.
+func (m *Manager) IdentityMappings(ctx context.Context, sourceID, cursor string) ([]IdentityMapping, string, error) {
+	accessToken, err := m.AccessToken(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	mappings, next, p := m.client.ListIdentityMappings(ctx, accessToken, sourceID, "user", cursor, identityMappingsPageLimit)
+	if p != nil {
+		return nil, "", p
+	}
+	return mappings, next, nil
 }
 
 // defaultManager is the process-wide digital-employee session, registered by

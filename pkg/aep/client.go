@@ -216,6 +216,50 @@ func (c *Client) DataScopeContext(ctx context.Context, accessToken, userID strin
 	return &out, nil
 }
 
+// IdentityMapping binds one external subject of an identity source (for
+// example a Feishu open_id or a WeCom userid) to a local platform user.
+type IdentityMapping struct {
+	SourceID            string `json:"sourceId"`
+	ExternalSubjectType string `json:"externalSubjectType"`
+	ExternalID          string `json:"externalId"`
+	LocalSubjectID      string `json:"localSubjectId"`
+	Status              string `json:"status"`
+}
+
+type identityMappingPage struct {
+	Mappings   []IdentityMapping `json:"mappings"`
+	NextCursor *string           `json:"nextCursor"`
+}
+
+// ListIdentityMappings pages through the subject mappings of one identity
+// source. The caller needs the identity.read permission; subjectType filters
+// to "user" or "team" mappings. An empty nextCursor means the final page.
+func (c *Client) ListIdentityMappings(ctx context.Context, accessToken, sourceID, subjectType, cursor string, limit int) ([]IdentityMapping, string, *Problem) {
+	if sourceID == "" {
+		return nil, "", &Problem{Title: "identity source is required", Status: http.StatusBadRequest}
+	}
+	if subjectType == "" {
+		subjectType = "user"
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
+	path := fmt.Sprintf("/aep/v1/admin/identity-sources/%s/mappings?subjectType=%s&limit=%d",
+		url.PathEscape(sourceID), url.QueryEscape(subjectType), limit)
+	if cursor != "" {
+		path += "&cursor=" + url.QueryEscape(cursor)
+	}
+	var out identityMappingPage
+	if p := c.get(ctx, path, accessToken, &out); p != nil {
+		return nil, "", p
+	}
+	next := ""
+	if out.NextCursor != nil {
+		next = *out.NextCursor
+	}
+	return out.Mappings, next, nil
+}
+
 func (c *Client) post(ctx context.Context, path, accessToken string, body any, out any) *Problem {
 	payload, err := json.Marshal(body)
 	if err != nil {
