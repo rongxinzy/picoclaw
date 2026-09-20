@@ -1,0 +1,566 @@
+openapi: 3.1.0
+info:
+  title: picoclaw Digital-Employee Runtime API
+  version: 1.0.0
+  description: |-
+    HTTP surfaces served by one picoclaw gateway process running as an AEP
+    digital employee. Three groups:
+
+    1. **aepchat** — the web-chat channel: authenticated AEP employees send
+       messages and poll for replies, plus the turn-relay endpoint that
+       resident gateways use to drive ephemeral forks.
+    2. **a2a** — the agent-to-agent delegation endpoint (JSON-RPC 2.0) and
+       the agent card.
+    3. **process health** — the gateway's own liveness endpoints.
+
+    This spec covers only the runtime side. The control-plane API (identity
+    sources and mappings, agent directory, data-scope rules, sessions) is
+    owned by the Agent Enterprise Protocol contract and is not duplicated
+    here.
+
+    Authentication summary:
+
+    | Surface | Credential |
+    |---|---|
+    | aepchat messages | AEP access token of a human account (`kind=human`) |
+    | aepchat relay turns | one-time relay secret injected by the fork supervisor |
+    | a2a JSON-RPC | AEP access token of a peer agent holding `agents.invoke` |
+    | health, agent card | none |
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: http://{host}:{port}
+    description: Local picoclaw gateway (host/port from the gateway config).
+    variables:
+      host: {default: 127.0.0.1}
+      port: {default: '18801'}
+tags:
+  - {name: Health}
+  - {name: aepchat}
+  - {name: Relay}
+  - {name: A2A}
+  - {name: Agent Card}
+paths:
+  /health:
+    get:
+      tags: [Health]
+      operationId: getProcessHealth
+      security: []
+      description: Gateway process liveness. Always served, channel-independent.
+      responses:
+        '200': {description: Process is up}
+  /ready:
+    get:
+      tags: [Health]
+      operationId: getProcessReady
+      security: []
+      description: Gateway readiness (channels and providers initialized).
+      responses:
+        '200': {description: Ready}
+  /aepchat/v1/health:
+    get:
+      tags: [aepchat]
+      operationId: getAepChatHealth
+      security: []
+      description: aepchat channel liveness; also the fork health probe.
+      responses:
+        '200': {description: Channel is running}
+  /aepchat/v1/chats/{chatId}/messages:
+    parameters:
+      - name: chatId
+        in: path
+        required: true
+        schema: {type: string, minLength: 1}
+        description: >-
+          Chat identifier: a single path segment (no slashes, percent-encoded
+          when needed). IM-relayed chats use a platform-prefixed id such as
+          `feishu:oc_xxx`.
+    post:
+      tags: [aepchat]
+      operationId: postChatMessage
+      summary: Send one chat message
+      description: >-
+        Requires the AEP access token of a human account; digital-employee
+        tokens (kind=agent) are rejected 403 — the structural bot-loop
+        prevention for this channel. When the warden is enabled and the
+        requester's teams lie strictly inside the resident's home-team
+        subtree, the request is proxied verbatim to the requester's
+        ephemeral fork and the fork's response is returned.
+      security: [{aepBearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PostMessageRequest'}
+            examples:
+              direct:
+                value: {text: '部门营收报告', chatType: direct}
+              group:
+                value: {text: 'hello team', chatType: group}
+      responses:
+        '202':
+          description: Message accepted; the reply arrives by polling.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PostMessageResponse'}
+        '400':
+          $ref: '#/components/responses/ChannelError'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChannelError'}
+              example: {code: UNAUTHORIZED, detail: 'token verification failed'}
+        '403':
+          description: >-
+            Sender rejected — not on the allow_from list, a digital-employee
+            token, or (on GET) not a participant of the chat.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChannelError'}
+              examples:
+                botLoop:
+                  value: {code: UNAUTHORIZED, detail: 'digital employees cannot use the chat channel'}
+                notAllowed:
+                  value: {code: SENDER_NOT_ALLOWED, detail: 'the aepchat allow_from list does not include this account'}
+        '405':
+          $ref: '#/components/responses/ChannelError'
+        '413':
+          description: Text exceeds the per-message limit (16384 runes).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChannelError'}
+              example: {code: MESSAGE_TOO_LARGE, detail: 'text exceeds the per-message limit'}
+        '503':
+          description: Channel not running, or ephemeral routing unavailable.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChannelError'}
+              examples:
+                notRunning:
+                  value: {code: CHANNEL_NOT_RUNNING, detail: 'aepchat is not running'}
+                ephemeral:
+                  value: {code: EPHEMERAL_UNAVAILABLE, detail: 'requester scope resolution failed: ...'}
+    get:
+      tags: [aepchat]
+      operationId: listChatMessages
+      summary: Poll chat messages after a sequence cursor
+      description: >-
+        Returns records with `seq` greater than `after`. Only chat
+        participants may poll: the requester must appear as the sender of an
+        earlier user record (an empty chat is readable by the first writer).
+        Warden-proxied requests follow the same rule on the fork.
+      security: [{aepBearerAuth: []}]
+      parameters:
+        - name: after
+          in: query
+          required: false
+          schema: {type: integer, format: int64, minimum: 0, default: 0}
+          description: Return only records with a greater sequence number.
+      responses:
+        '200':
+          description: Chat page.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MessagePage'}
+        '400':
+          $ref: '#/components/responses/ChannelError'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChannelError'}
+        '403':
+          description: Not a participant of this chat.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChannelError'}
+              example: {code: NOT_PARTICIPANT, detail: 'this account has not written to the chat'}
+        '503':
+          $ref: '#/components/responses/ChannelError'
+  /aepchat/v1/relay/turns:
+    post:
+      tags: [Relay]
+      operationId: postRelayTurn
+      summary: Execute one relayed turn on a fork
+      description: |-
+        Turn relay for IM channels: a resident gateway that routed a
+        subordinate's platform message to this ephemeral fork submits the
+        turn here and awaits the final reply, which it sends through its own
+        platform connection. The relay secret — generated by the fork
+        supervisor at spawn, injected via PICOCLAW_AEPCHAT_RELAY_TOKEN, and
+        never configured on resident instances — authenticates the caller.
+        The requester identity arrives as data already resolved by the
+        resident's identity-mapping bridge, so the fork's tools scope by the
+        original requester.
+
+        Replies hand off through a FIFO waiter queue per chat: concurrent
+        relay turns for one chat each receive exactly their own turn's
+        final reply (per-session turn serialization keeps finals in arrival
+        order). A timed-out turn's eventual final is discarded, never
+        misdelivered.
+      security: [{relayBearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RelayTurnRequest'}
+            example:
+              chatID: 'feishu:oc_abc'
+              chatType: direct
+              requesterUserID: user-42
+              requesterDisplayName: 'Wen Xiaoxia'
+              text: '帮我出部门报告'
+              sourceChannel: feishu
+      responses:
+        '202':
+          description: Turn finished; the reply is the turn's final output.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RelayTurnResponse'}
+        '400':
+          $ref: '#/components/responses/ChannelError'
+        '401':
+          description: Relay token mismatch.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChannelError'}
+              example: {code: RELAY_UNAUTHORIZED, detail: 'relay token mismatch'}
+        '405':
+          $ref: '#/components/responses/ChannelError'
+        '413':
+          $ref: '#/components/responses/ChannelError'
+        '503':
+          description: Relay disabled (resident instance), busy, or not running.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChannelError'}
+              examples:
+                disabled:
+                  value: {code: RELAY_DISABLED, detail: 'this instance accepts no relayed turns'}
+                busy:
+                  value: {code: RELAY_BUSY, detail: 'too many queued relay turns for this chat'}
+                notRunning:
+                  value: {code: CHANNEL_NOT_RUNNING, detail: 'aepchat is not running'}
+        '504':
+          description: The fork did not finish the turn within the budget (120s).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChannelError'}
+              example: {code: RELAY_TURN_TIMEOUT, detail: 'the fork did not finish the turn in time'}
+  /.well-known/agent-card.json:
+    get:
+      tags: [Agent Card]
+      operationId: getAgentCard
+      security: []
+      description: This runtime's A2A agent card (well-known location).
+      responses:
+        '200':
+          description: Agent card.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentCard'}
+  /a2a/card.json:
+    get:
+      tags: [Agent Card]
+      operationId: getAgentCardMirror
+      security: []
+      description: Mirror of the agent card for peers that cannot reach the well-known path.
+      responses:
+        '200':
+          description: Agent card.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentCard'}
+  /a2a/:
+    post:
+      tags: [A2A]
+      operationId: a2aRpc
+      summary: Agent-to-agent JSON-RPC 2.0 endpoint
+      description: |-
+        Requires the AEP access token of a peer digital employee holding the
+        `agents.invoke` permission. JSON-RPC errors are returned with HTTP
+        200 per the JSON-RPC 2.0 over-HTTP convention.
+
+        `message/send` runs one delegated turn. The delegation chain is
+        mandatory: `message.metadata.aep_act_as_user` names the human on
+        whose behalf the task runs — it becomes the turn's sender identity,
+        so every tool inside the callee resolves scope by that original
+        requester, never by the calling agent. `metadata.aep_chain` carries
+        the visited agents (comma-separated); the chain including this hop
+        is capped by the callee's configured maximum depth (default 3).
+
+        Application error codes: -32600 invalid request; -32601 unknown
+        method; -32602 invalid params (e.g. no text part); -32001
+        authentication failed; -32002 missing agents.invoke permission;
+        -32003 act-as missing or endpoint not running; -32004 chain depth
+        exceeded; -32005 task not found.
+      security: [{aepBearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/JSONRPCRequest'}
+            examples:
+              messageSend:
+                value:
+                  jsonrpc: '2.0'
+                  id: 'req-1'
+                  method: message/send
+                  params:
+                    message:
+                      role: user
+                      parts: [{kind: text, text: 'AEP_DEPT_REPORT please'}]
+                      metadata:
+                        aep_act_as_user: user-42
+                        aep_caller: agent-support
+                        aep_chain: agent-support
+              tasksGet:
+                value:
+                  jsonrpc: '2.0'
+                  id: 'req-2'
+                  method: tasks/get
+                  params: {taskId: 'task-17'}
+      responses:
+        '200':
+          description: >-
+            JSON-RPC envelope: `result` carries the Task for message/send
+            and tasks/get; `error` carries the codes listed above.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/JSONRPCResult'
+                  - $ref: '#/components/schemas/JSONRPCError'
+              examples:
+                completed:
+                  value:
+                    jsonrpc: '2.0'
+                    id: 'req-1'
+                    result:
+                      id: 'task-17'
+                      state: completed
+                      aep_act_as: user-42
+                      aep_caller: agent-support
+                      aep_chain: [agent-support]
+                      artifacts: [{kind: text, text: 'team=dept-a revenue ...'}]
+                      createdAt: '2026-09-20T06:00:00Z'
+                      updatedAt: '2026-09-20T06:00:05Z'
+                chainTooDeep:
+                  value:
+                    jsonrpc: '2.0'
+                    id: 'req-1'
+                    error: {code: -32004, message: 'delegation chain exceeds the maximum depth of 3'}
+components:
+  securitySchemes:
+    aepBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: AEP access token issued by the control service (Ed25519 JWT, audience aep-control).
+    relayBearerAuth:
+      type: http
+      scheme: bearer
+      description: One-time relay secret generated by the fork supervisor at spawn; valid only on ephemeral forks.
+  responses:
+    ChannelError:
+      description: Error with a stable channel error code.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ChannelError'}
+  schemas:
+    ChannelError:
+      type: object
+      required: [code, detail]
+      properties:
+        code:
+          type: string
+          description: Stable error code.
+          enum:
+            - INVALID_REQUEST
+            - INVALID_CHAT
+            - UNAUTHORIZED
+            - SENDER_NOT_ALLOWED
+            - NOT_PARTICIPANT
+            - MESSAGE_TOO_LARGE
+            - CHANNEL_NOT_RUNNING
+            - EPHEMERAL_UNAVAILABLE
+            - METHOD_NOT_ALLOWED
+            - ROUTE_NOT_FOUND
+            - RELAY_UNAUTHORIZED
+            - RELAY_DISABLED
+            - RELAY_BUSY
+            - RELAY_TURN_TIMEOUT
+        detail: {type: string}
+    PostMessageRequest:
+      type: object
+      required: [text]
+      properties:
+        text: {type: string, minLength: 1, description: Message text (trimmed; at most 16384 runes).}
+        chatType: {type: string, enum: [direct, group], default: direct, description: Group chats fan out to every participating digital employee instance.}
+    PostMessageResponse:
+      type: object
+      required: [messageId, seq]
+      properties:
+        messageId: {type: string}
+        seq: {type: integer, format: int64, description: Sequence number of the stored user record.}
+    ChatRecord:
+      type: object
+      required: [seq, from, text, at]
+      properties:
+        seq: {type: integer, format: int64}
+        from: {type: string, enum: [user, agent]}
+        senderId: {type: string, description: AEP user id of the writer (user records).}
+        senderName: {type: string}
+        text: {type: string}
+        at: {type: string, format: date-time}
+    MessagePage:
+      type: object
+      required: [messages, nextAfter]
+      properties:
+        messages:
+          type: array
+          items: {$ref: '#/components/schemas/ChatRecord'}
+        nextAfter: {type: integer, format: int64, description: Cursor for the next poll (seq of the last record).}
+    RelayTurnRequest:
+      type: object
+      required: [chatID, requesterUserID, text]
+      properties:
+        chatID:
+          type: string
+          minLength: 1
+          description: "Platform-prefixed chat id (`feishu:oc_...`, `wecom:wr_...`); one path segment."
+        chatType: {type: string, enum: [direct, group], default: direct}
+        requesterUserID: {type: string, minLength: 1, description: AEP user the resident resolved through the identity mapping.}
+        requesterDisplayName: {type: string}
+        text: {type: string, minLength: 1, description: Message text (at most 16384 runes).}
+        sourceChannel: {type: string, description: "Originating platform (feishu, wecom)."}
+    RelayTurnResponse:
+      type: object
+      required: [reply, seq]
+      properties:
+        reply: {type: string, description: The turn's final output; may be empty.}
+        seq: {type: integer, format: int64, description: Sequence number of the stored user record.}
+    AgentCard:
+      type: object
+      required: [name, url, version, protocolVersion, capabilities, defaultInputModes, defaultOutputModes, authentication]
+      properties:
+        name: {type: string}
+        description: {type: string}
+        url: {type: string, description: Base URL of this agent's A2A endpoint.}
+        version: {type: string}
+        protocolVersion: {type: string, const: '1.0'}
+        capabilities: {$ref: '#/components/schemas/CardCapabilities'}
+        defaultInputModes: {type: array, items: {type: string}}
+        defaultOutputModes: {type: array, items: {type: string}}
+        provider: {type: string}
+        authentication: {$ref: '#/components/schemas/CardAuth'}
+        skills:
+          type: array
+          items: {$ref: '#/components/schemas/CardSkill'}
+    CardCapabilities:
+      type: object
+      required: [streaming, pushNotifications, stateTransitionHook]
+      properties:
+        streaming: {type: boolean}
+        pushNotifications: {type: boolean}
+        stateTransitionHook: {type: boolean}
+    CardAuth:
+      type: object
+      required: [schemes]
+      properties:
+        schemes: {type: array, items: {type: string}, example: [bearer]}
+    CardSkill:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        description: {type: string}
+    JSONRPCRequest:
+      type: object
+      required: [jsonrpc, method]
+      properties:
+        jsonrpc: {type: string, const: '2.0'}
+        id: {description: Client correlation id (string or number).}
+        method:
+          type: string
+          enum: [message/send, tasks/get]
+        params:
+          oneOf:
+            - type: object
+              required: [message]
+              properties:
+                message: {$ref: '#/components/schemas/A2AMessage'}
+            - type: object
+              required: [taskId]
+              properties:
+                taskId: {type: string}
+    A2AMessage:
+      type: object
+      required: [role, parts]
+      properties:
+        role: {type: string, example: user}
+        parts:
+          type: array
+          items: {$ref: '#/components/schemas/A2APart'}
+        messageId: {type: string}
+        metadata:
+          type: object
+          additionalProperties: {type: string}
+          description: >-
+            Delegation keys: aep_act_as_user (required — the human the task
+            runs for), aep_caller (the invoking agent), aep_chain
+            (comma-separated visited agents).
+    A2APart:
+      type: object
+      required: [kind, text]
+      properties:
+        kind: {type: string, const: text}
+        text: {type: string}
+    JSONRPCResult:
+      type: object
+      required: [jsonrpc, id, result]
+      properties:
+        jsonrpc: {type: string, const: '2.0'}
+        id: {description: Echoed correlation id.}
+        result: {$ref: '#/components/schemas/Task'}
+    JSONRPCError:
+      type: object
+      required: [jsonrpc, error]
+      properties:
+        jsonrpc: {type: string, const: '2.0'}
+        id: {description: Echoed correlation id; omitted when the request could not be parsed.}
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: integer
+              description: >-
+                -32600 invalid request; -32601 unknown method; -32602 invalid
+                params; -32001 authentication failed; -32002 missing
+                agents.invoke; -32003 act-as missing or not running; -32004
+                chain depth exceeded; -32005 task not found.
+            message: {type: string}
+    Task:
+      type: object
+      required: [id, state, aep_act_as, aep_caller, aep_chain, createdAt, updatedAt]
+      properties:
+        id: {type: string}
+        state: {type: string, enum: [submitted, working, completed, failed]}
+        aep_act_as: {type: string, description: The human the task ran for (from aep_act_as_user).}
+        aep_caller: {type: string, description: The invoking agent.}
+        aep_chain: {type: array, items: {type: string}, description: Delegation chain visited by this task.}
+        artifacts:
+          type: array
+          items: {$ref: '#/components/schemas/Artifact'}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    Artifact:
+      type: object
+      required: [kind, text]
+      properties:
+        kind: {type: string, const: text}
+        text: {type: string}
