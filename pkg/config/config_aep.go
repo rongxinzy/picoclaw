@@ -47,6 +47,10 @@ type AEPChatSettings struct {
 	// by the fork supervisor at spawn via PICOCLAW_AEPCHAT_RELAY_TOKEN;
 	// never set on a resident instance.
 	RelaySecret SecureString `json:"relay_secret,omitzero" yaml:"-" env:"PICOCLAW_AEPCHAT_RELAY_TOKEN"`
+	// Streaming enables SSE drafts on the chat stream endpoint: the agent
+	// loop pushes accumulated assistant text through bus.Streamer and the
+	// final record commits through the same path.
+	Streaming StreamingConfig `json:"streaming,omitzero" yaml:"-"`
 }
 
 // AEPChannelSettings binds an IM channel (feishu, wecom, ...) to the AEP

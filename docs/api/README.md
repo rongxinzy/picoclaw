@@ -22,7 +22,7 @@ npx redocly preview-docs picoclaw-runtime.openapi.yaml
 
 | 分组 | 接口 | 认证 |
 |---|---|---|
-| aepchat | `POST/GET /aepchat/v1/chats/{chatId}/messages`、`GET /aepchat/v1/health` | 人类账号的 AEP access token（kind=agent 拒绝，防 bot 环） |
+| aepchat | `POST/GET /aepchat/v1/chats/{chatId}/messages`、`GET /aepchat/v1/chats/{chatId}/stream`（SSE）、`GET /aepchat/v1/health` | 人类账号的 AEP access token（kind=agent 拒绝，防 bot 环） |
 | Relay | `POST /aepchat/v1/relay/turns` | fork supervisor 在 spawn 时生成的 per-fork relay secret（fork 生命周期内复用，常驻实例上不存在；安全模型假定 fork 只绑回环地址） |
 | A2A | `POST /a2a/`（JSON-RPC 2.0） | 对端数字员工的 AEP token + `agents.invoke` 权限 |
 | Agent Card | `GET /.well-known/agent-card.json`、`GET /a2a/card.json` | 无 |

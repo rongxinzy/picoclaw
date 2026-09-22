@@ -43,6 +43,12 @@ const (
 	relayTurnTimeout = 120 * time.Second
 	// relayMaxWaiters caps queued relay turns per chat.
 	relayMaxWaiters = 16
+	// SSE stream cadence and buffering.
+	sseHeartbeat     = 20 * time.Second
+	sseSubscriberBuf = 64
+	evKindRecord     = "record"
+	evKindDraft      = "draft"
+	evKindReconnect  = "reconnect"
 	// relayResultCache bounds how many finished relay turns (by turnId)
 	// stay replayable for idempotent supervisor retries.
 	relayResultCache = 64
@@ -70,6 +76,13 @@ type relayTurnResult struct {
 	seq   int64
 }
 
+// streamEvent is one SSE event delivered to live subscribers. data is
+// pre-marshaled JSON so every subscriber byte-shares the payload.
+type streamEvent struct {
+	kind string
+	data []byte
+}
+
 // Channel implements an AEP-authenticated HTTP chat channel with polling
 // delivery. Conversation history is buffered in memory per chat; each chat
 // gets an independent agent session (per-chat, per-sender session keys).
@@ -95,6 +108,11 @@ type Channel struct {
 	// outcome instead of re-executing the turn.
 	relayResults     map[string]relayTurnResult
 	relayResultOrder []string
+
+	streaming   bool
+	streamMu    sync.Mutex
+	drafts      map[string]string             // chat ID → accumulated draft text
+	subscribers map[string][]chan streamEvent // chat ID → live SSE subscribers
 	// relayTimeout bounds one relayed turn; swappable in tests.
 	relayTimeout time.Duration
 
@@ -120,9 +138,12 @@ func New(channelName string, bc *config.Channel, settings *config.AEPChatSetting
 		history:      make(map[string][]record),
 		lastSeq:      make(map[string]int64),
 		historyLimit: limit,
-		relayWaiters:  make(map[string][]chan string),
-		relaySkips:    make(map[string]int),
-		relayResults:  make(map[string]relayTurnResult),
+		relayWaiters: make(map[string][]chan string),
+		relaySkips:   make(map[string]int),
+		relayResults: make(map[string]relayTurnResult),
+		drafts:       make(map[string]string),
+		subscribers:  make(map[string][]chan streamEvent),
+		streaming:    settings != nil && settings.Streaming.Enabled,
 	}
 	if settings != nil {
 		ch.relaySecret = settings.RelaySecret.String()
@@ -178,11 +199,51 @@ func (c *Channel) Send(_ context.Context, msg bus.OutboundMessage) ([]string, er
 // WebhookPath registers the channel subtree on the shared gateway mux.
 func (c *Channel) WebhookPath() string { return pathPrefix }
 
+// BeginStream implements channels.StreamingCapable: the agent loop streams
+// assistant replies through bus.Streamer when the channel config enables it.
+func (c *Channel) BeginStream(_ context.Context, chatID string) (channels.Streamer, error) {
+	if !c.streaming {
+		return nil, errors.New("aepchat streaming disabled in config")
+	}
+	if !c.IsRunning() {
+		return nil, channels.ErrNotRunning
+	}
+	return &aepchatStreamer{channel: c, chatID: chatID}, nil
+}
+
+// aepchatStreamer feeds the SSE layer: Update publishes accumulated drafts,
+// Finalize commits the authoritative record.
+type aepchatStreamer struct {
+	channel *Channel
+	chatID  string
+}
+
+func (s *aepchatStreamer) Update(_ context.Context, accumulated string) error {
+	s.channel.publishDraft(s.chatID, accumulated)
+	return nil
+}
+
+// Finalize commits the final record. The channel manager suppresses the
+// normal outbound Send for streamed finals, so this path must reproduce
+// Send's full semantics: append the record and wake any queued relay
+// waiter.
+func (s *aepchatStreamer) Finalize(_ context.Context, content string) error {
+	s.channel.append(s.chatID, record{From: "agent", Text: content})
+	s.channel.publishDraft(s.chatID, "")
+	s.channel.deliverRelay(s.chatID, content)
+	return nil
+}
+
+func (s *aepchatStreamer) Cancel(_ context.Context) {
+	s.channel.publishDraft(s.chatID, "")
+}
+
 // ServeHTTP self-routes the channel API:
 //
 //	GET  /aepchat/v1/health
 //	POST /aepchat/v1/chats/{chatID}/messages   {"text": "...", "chatType": "..."}
 //	GET  /aepchat/v1/chats/{chatID}/messages?after=<seq>
+//	GET  /aepchat/v1/chats/{chatID}/stream?after=<seq>   (SSE)
 func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, pathPrefix)
 	switch {
@@ -205,6 +266,19 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "use POST or GET")
+		return
+	case strings.HasPrefix(path, "v1/chats/") && strings.HasSuffix(path, "/stream"):
+		rest := strings.TrimSuffix(strings.TrimPrefix(path, "v1/chats/"), "/stream")
+		chatID, err := urlPathUnescape(rest)
+		if err != nil || chatID == "" || strings.Contains(chatID, "/") {
+			writeError(w, http.StatusBadRequest, "INVALID_CHAT", "chat id must be a single non-empty path segment")
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "use GET")
+			return
+		}
+		c.handleStream(w, r, chatID)
 		return
 	case path == "v1/relay/turns":
 		if r.Method != http.MethodPost {
@@ -345,6 +419,125 @@ func (c *Channel) handleGet(w http.ResponseWriter, r *http.Request, chatID strin
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"messages": out, "nextAfter": next})
+}
+
+// handleStream serves one chat as SSE: it replays records newer than the
+// `after` cursor, then streams live records and assistant drafts. The
+// subscription and history snapshot happen under one streamMu section so no
+// event can fall between replay and live phases.
+func (c *Channel) handleStream(w http.ResponseWriter, r *http.Request, chatID string) {
+	if !c.running.Load() {
+		writeError(w, http.StatusServiceUnavailable, "CHANNEL_NOT_RUNNING", "aepchat is not running")
+		return
+	}
+	principal, status, problem := c.authenticate(r)
+	if problem != "" {
+		writeError(w, status, "UNAUTHORIZED", problem)
+		return
+	}
+	if target, routeErr := c.route(r.Context(), principal); routeErr != nil {
+		writeError(w, http.StatusServiceUnavailable, "EPHEMERAL_UNAVAILABLE", routeErr.Error())
+		return
+	} else if target != "" {
+		c.proxyTo(w, r, target)
+		return
+	}
+	after := int64(0)
+	if raw := r.URL.Query().Get("after"); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed < 0 {
+			writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "after must be a non-negative integer")
+			return
+		}
+		after = parsed
+	}
+	c.mu.Lock()
+	participant := c.participates(c.history[chatID], principal.UserID)
+	c.mu.Unlock()
+	if !participant {
+		writeError(w, http.StatusForbidden, "NOT_PARTICIPANT", "this account has not written to the chat")
+		return
+	}
+
+	rc := http.NewResponseController(w)
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream; charset=utf-8")
+	h.Set("Cache-Control", "no-cache, no-transform")
+	h.Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	writeEvent := func(kind string, data []byte) bool {
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", kind, data); err != nil {
+			return false
+		}
+		return rc.Flush() == nil
+	}
+
+	// Subscribe and snapshot atomically: publishers take streamMu to
+	// broadcast, so everything appended after this section lands in the
+	// subscriber channel, never between replay and live.
+	sub := make(chan streamEvent, sseSubscriberBuf)
+	c.streamMu.Lock()
+	c.subscribers[chatID] = append(c.subscribers[chatID], sub)
+	c.mu.Lock()
+	snapshot := append([]record(nil), c.history[chatID]...)
+	draft := c.drafts[chatID]
+	c.mu.Unlock()
+	c.streamMu.Unlock()
+	defer func() {
+		c.streamMu.Lock()
+		subs := c.subscribers[chatID]
+		for i, s := range subs {
+			if s == sub {
+				c.subscribers[chatID] = append(subs[:i], subs[i+1:]...)
+				break
+			}
+		}
+		c.streamMu.Unlock()
+	}()
+
+	for _, rec := range snapshot {
+		if rec.Seq > after {
+			if !writeEvent(evKindRecord, mustMarshal(rec)) {
+				return
+			}
+		}
+	}
+	if draft != "" {
+		if !writeEvent(evKindDraft, mustMarshal(map[string]string{"text": draft})) {
+			return
+		}
+	}
+
+	heartbeat := time.NewTicker(sseHeartbeat)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case ev := <-sub:
+			if !writeEvent(ev.kind, ev.data) {
+				return
+			}
+			if ev.kind == evKindReconnect {
+				return
+			}
+		case <-heartbeat.C:
+			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
+				return
+			}
+			if rc.Flush() != nil {
+				return
+			}
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func mustMarshal(v any) []byte {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return []byte("{}")
+	}
+	return data
 }
 
 // handleRelayTurn executes one turn on behalf of a resident gateway that
@@ -607,7 +800,6 @@ func (c *Channel) participates(all []record, userID string) bool {
 func (c *Channel) append(chatID string, rec record) record {
 	now := time.Now().UTC().Format(time.RFC3339)
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.lastSeq[chatID]++
 	rec.Seq = c.lastSeq[chatID]
 	rec.At = now
@@ -615,7 +807,53 @@ func (c *Channel) append(chatID string, rec record) record {
 	if excess := len(c.history[chatID]) - c.historyLimit; excess > 0 {
 		c.history[chatID] = c.history[chatID][excess:]
 	}
+	c.mu.Unlock()
+	c.publishRecord(chatID, rec)
 	return rec
+}
+
+// publishRecord broadcasts one committed record to the chat's SSE
+// subscribers. Callers must not hold c.mu (lock order: c.mu is always
+// released before streamMu).
+func (c *Channel) publishRecord(chatID string, rec record) {
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	c.broadcast(chatID, streamEvent{kind: evKindRecord, data: data})
+}
+
+// publishDraft stores the accumulated assistant draft (empty clears it) and
+// broadcasts the full-state text; clients replace, not append.
+func (c *Channel) publishDraft(chatID, text string) {
+	c.streamMu.Lock()
+	if strings.TrimSpace(text) == "" {
+		delete(c.drafts, chatID)
+	} else {
+		c.drafts[chatID] = text
+	}
+	c.streamMu.Unlock()
+	data, _ := json.Marshal(map[string]string{"text": text})
+	c.broadcast(chatID, streamEvent{kind: evKindDraft, data: data})
+}
+
+// broadcast delivers an event to every subscriber. Publishing is serialized
+// by streamMu; a slow consumer overflows its buffer and is forced onto a
+// clean reconnect instead of silently missing records.
+func (c *Channel) broadcast(chatID string, ev streamEvent) {
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	for _, sub := range c.subscribers[chatID] {
+		select {
+		case sub <- ev:
+		default:
+			select {
+			case <-sub: // drop the oldest queued event
+			default:
+			}
+			sub <- streamEvent{kind: evKindReconnect, data: []byte("{}")}
+		}
+	}
 }
 
 // route applies the resident/ephemeral split when the warden is enabled.
@@ -658,7 +896,30 @@ func (c *Channel) proxyTo(w http.ResponseWriter, r *http.Request, target string)
 	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
+	for _, hk := range []string{"Cache-Control", "X-Accel-Buffering"} {
+		if v := resp.Header.Get(hk); v != "" {
+			w.Header().Set(hk, v)
+		}
+	}
 	w.WriteHeader(resp.StatusCode)
+	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		// SSE pass-through: flush every chunk so fork-streamed drafts cross
+		// the resident proxy without buffering.
+		rc := http.NewResponseController(w)
+		buf := make([]byte, 4096)
+		for {
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				if _, werr := w.Write(buf[:n]); werr != nil {
+					return
+				}
+				_ = rc.Flush()
+			}
+			if err != nil {
+				return
+			}
+		}
+	}
 	_, _ = io.Copy(w, resp.Body)
 }
 

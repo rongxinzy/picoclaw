@@ -247,6 +247,90 @@ paths:
               example: {code: NOT_PARTICIPANT, detail: 'this account has not written to the chat'}
         '503':
           $ref: '#/components/responses/ChannelError'
+  /aepchat/v1/chats/{chatId}/stream:
+    parameters:
+      - name: chatId
+        in: path
+        required: true
+        schema: {type: string, minLength: 1}
+        description: Same chat id space as the messages endpoints.
+    get:
+      tags: [aepchat]
+      operationId: streamChatMessages
+      summary: Server-sent events for one chat
+      description: |-
+        Live chat feed over SSE. Same authentication and participant rule
+        as the polling GET; warden-proxied chats stream through the fork —
+        the resident proxies this path verbatim with flush-through.
+
+        Event semantics:
+
+        - `record` — one complete message record (the ChatRecord shape).
+          Sent for the replay (records with seq greater than `after`) and
+          for every message appended afterwards. An agent `record`
+          supersedes any active draft.
+        - `draft` — accumulated text of the in-progress assistant reply.
+          Full-state, not a delta: the client replaces its draft. Emitted
+          only when the instance streams this turn; an empty text clears
+          the draft.
+        - `reconnect` — events were dropped for a slow consumer; the server
+          closes the connection after sending it. Reconnect with
+          `after=<last seen seq>`.
+        - SSE comments (`: ping`) every 20s keep the connection alive.
+
+        Streaming requires the channel's `streaming.enabled` config on the
+        serving instance; without it replies arrive as single complete
+        records. Relay turns (IM subordinates) are final-only by protocol
+        and never produce drafts.
+      security: [{humanBearerAuth: []}]
+      parameters:
+        - name: after
+          in: query
+          required: false
+          schema: {type: integer, format: int64, minimum: 0, default: 0}
+          description: Replay records with a greater sequence number before going live.
+      responses:
+        '200':
+          description: Event stream of record/draft/reconnect events.
+          content:
+            text/event-stream:
+              schema: {type: string}
+              example: |-
+                event: record
+                data: {"seq":1,"from":"user","senderId":"user-1","senderName":"Zhang San","text":"部门营收报告","at":"2026-09-22T06:00:00Z"}
+
+                event: draft
+                data: {"text":"以下是本季度"}
+
+                event: record
+                data: {"seq":2,"from":"agent","text":"以下是本季度营收拆分…","at":"2026-09-22T06:00:05Z"}
+
+                : ping
+        '400':
+          $ref: '#/components/responses/ChannelError'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChannelError'}
+        '403':
+          description: Not a participant of this chat.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChannelError'}
+              example: {code: NOT_PARTICIPANT, detail: 'this account has not written to the chat'}
+        '405':
+          $ref: '#/components/responses/ChannelError'
+        '503':
+          description: Channel not running, or ephemeral routing unavailable.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChannelError'}
+              examples:
+                notRunning:
+                  value: {code: CHANNEL_NOT_RUNNING, detail: 'aepchat is not running'}
+                ephemeral:
+                  value: {code: EPHEMERAL_UNAVAILABLE, detail: 'requester scope resolution failed: ...'}
   /aepchat/v1/relay/turns:
     post:
       tags: [Relay]
@@ -514,6 +598,7 @@ components:
             - EPHEMERAL_UNAVAILABLE
             - METHOD_NOT_ALLOWED
             - ROUTE_NOT_FOUND
+            - PROXY_FAILED
             - RELAY_UNAUTHORIZED
             - RELAY_DISABLED
             - RELAY_BUSY
