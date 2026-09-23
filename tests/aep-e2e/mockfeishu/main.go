@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -32,6 +33,7 @@ var (
 	appSecret = flag.String("app-secret", "mock-secret", "expected app secret")
 	httpAddr  = flag.String("http", "127.0.0.1:0", "HTTP listen address")
 	wsAddr    = flag.String("ws", "127.0.0.1:0", "websocket listen address")
+	advertise = flag.String("advertise", "", "advertised host:port for the bootstrap ws URL (default 127.0.0.1:<wsPort>)")
 )
 
 type sendRecord struct {
@@ -193,7 +195,12 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"code": 0, "msg": "",
 			"data": map[string]any{
-				"URL": fmt.Sprintf("ws://127.0.0.1:%d/ws?device_id=d1&service_id=1", s.wsPort),
+				"URL": func() string {
+					if *advertise != "" {
+						return fmt.Sprintf("ws://%s/ws?device_id=d1&service_id=1", *advertise)
+					}
+					return fmt.Sprintf("ws://127.0.0.1:%d/ws?device_id=d1&service_id=1", s.wsPort)
+				}(),
 				"ClientConfig": map[string]int{
 					"PingInterval":      15,
 					"ReconnectCount":    3,
@@ -253,8 +260,24 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"code": 0, "msg": "ok",
 			"data": map[string]any{"message_id": fmt.Sprintf("om_out_%d", len(s.sent))},
 		})
+	case r.Method == http.MethodPatch && hasPrefix(r.URL.Path, "/open-apis/im/v1/messages"):
+		// Card updates carry the FINAL reply text; record them so E2E
+		// drivers can assert on answers, not just the "thinking..." card.
+		var body map[string]any
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &body)
+		content := str(body["content"])
+		s.mu.Lock()
+		s.sent = append(s.sent, sendRecord{
+			ReceiveID:   str(body["receive_id"]),
+			ReceiveType: "card_update",
+			MsgType:     "card-update",
+			Content:     content,
+		})
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"code": 0, "msg": "ok", "data": map[string]any{}})
 	default:
-		// Catch-all for card patches, reactions, resource fetches: success.
+		// Catch-all for reactions, resource fetches: success.
 		writeJSON(w, http.StatusOK, map[string]any{"code": 0, "msg": "ok", "data": map[string]any{}})
 	}
 }
