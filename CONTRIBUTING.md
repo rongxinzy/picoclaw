@@ -178,25 +178,18 @@ If you are unsure whether a piece of AI-generated code is safe, say so in the PR
 
 ## Pull Request Process
 
+For the `rongxinzy` fork, [DEVOPS.md](DEVOPS.md) owns the PR and review process. The lightweight requirements below replace the upstream process; this does not change the repository's frozen runtime status.
+
 ### Before Opening a PR
 
-- [ ] Run `make check` and ensure it passes locally.
+- [ ] Run checks relevant to the change and all existing required CI gates; record environment or baseline failures.
 - [ ] Fill in the PR template completely, including the AI disclosure section.
 - [ ] Link any related issue(s) in the PR description.
 - [ ] Keep the PR focused. Avoid bundling unrelated changes together.
 
 ### PR Template Sections
 
-The PR template asks for:
-
-- **Description** — What does this change do and why?
-- **Type of Change** — Bug fix, feature, docs, or refactor.
-- **AI Code Generation** — Disclosure of AI involvement (required).
-- **Related Issue** — Link to the issue this addresses.
-- **Technical Context** — Reference URLs and reasoning (skip for pure docs PRs).
-- **Test Environment** — Hardware, OS, model/provider, and channels used for testing.
-- **Evidence** — Optional logs or screenshots demonstrating the change works.
-- **Checklist** — Self-review confirmation.
+The template requires change, reason, and validation. Bug fixes also describe the trigger, cause, and before/after behavior. Link an existing issue when applicable; a separate issue is not mandatory for small fixes. Keep the existing AI disclosure concise. Add environment details and evidence only when needed to understand validation.
 
 ### PR Size
 
@@ -208,28 +201,28 @@ Prefer small, reviewable PRs. A PR that changes 200 lines across 5 files is much
 
 ### Long-Lived Branches
 
-- **`main`** — the active development branch. All feature PRs target `main`. The branch is protected: direct pushes are not permitted, and at least one maintainer approval is required before merging.
+- **`main`** — the default branch; changes go through PRs. Actual GitHub protection is separate from the documented review convention.
 - **`release/x.y`** — stable release branches, cut from `main` when a version is ready to ship. These branches are more strictly protected than `main`.
 
 ### Requirements to Merge into `main`
 
 A PR can only be merged when all of the following are satisfied:
 
-1. **CI passes** — All GitHub Actions workflows (lint, test, build) must be green.
-2. **Reviewer approval** — At least one maintainer has approved the PR.
-3. **No unresolved review comments** — All review threads must be resolved.
-4. **PR template is complete** — Including AI disclosure and test environment.
+1. Relevant validation and existing required CI gates pass.
+2. Every PR has one formal GitHub approval covering the latest push, including documentation changes. Independent AI review may assist but does not replace approval. High-impact changes require maintainer confirmation, as defined in DEVOPS.md.
+3. Blocking review findings are addressed; unrelated suggestions do not expand scope.
+4. The concise PR template is complete, including the existing AI disclosure.
 
 ### Who Can Merge
 
-Only maintainers can merge PRs. Contributors cannot merge their own PRs, even if they have write access.
+Merge authority follows the fork's actual GitHub permissions. Authors with merge authority may merge after the applicable review and checks; self-review is not independent review.
 
 ### Merge Strategy
 
 We use **squash merge** for most PRs to keep the `main` history clean and readable. Each merged PR becomes a single commit referencing the PR number, e.g.:
 
 ```
-feat: Add Ollama provider support (#491)
+feat: add ollama provider support (#491)
 ```
 
 If a PR consists of multiple independent, well-separated commits that tell a clear story, a regular merge may be used at the maintainer's discretion.
