@@ -1,0 +1,8 @@
+{
+  "workflows": [
+    {
+      "name": "PR",
+      "path": ".github/workflows/pr.yml"
+    }
+  ]
+}
